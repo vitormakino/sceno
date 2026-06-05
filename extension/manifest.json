@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "Lyrics on Screen",
+  "version": "1.0",
+  "description": "Sends YouTube / YouTube Music captions to the desktop overlay daemon.",
+  "content_scripts": [
+    {
+      "matches": ["*://www.youtube.com/*"],
+      "js": ["content_youtube.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["*://music.youtube.com/*"],
+      "js": ["content_ytmusic.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "host_permissions": ["ws://localhost:8765/"]
+}
