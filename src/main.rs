@@ -15,6 +15,61 @@ use tokio_tungstenite::accept_async;
 const WS_PORT: u16 = 8765;
 const CLEAR_AFTER_SECS: u64 = 5;
 
+// ── Settings types ────────────────────────────────────────────────────────────
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Position {
+    Bottom,
+    Top,
+}
+
+impl Position {
+    fn anchor(self) -> Anchor {
+        match self {
+            Position::Bottom => Anchor::Bottom | Anchor::Left | Anchor::Right,
+            Position::Top => Anchor::Top | Anchor::Left | Anchor::Right,
+        }
+    }
+    fn margin(self) -> (i32, i32, i32, i32) {
+        match self {
+            Position::Bottom => (0, 0, 40, 0),
+            Position::Top => (40, 0, 0, 0),
+        }
+    }
+    fn index(self) -> usize {
+        match self {
+            Position::Bottom => 0,
+            Position::Top => 1,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum FontSize {
+    Small,
+    Medium,
+    Large,
+}
+
+impl FontSize {
+    fn px(self) -> f32 {
+        match self {
+            FontSize::Small => 22.0,
+            FontSize::Medium => 32.0,
+            FontSize::Large => 44.0,
+        }
+    }
+    fn index(self) -> usize {
+        match self {
+            FontSize::Small => 0,
+            FontSize::Medium => 1,
+            FontSize::Large => 2,
+        }
+    }
+}
+
+// ── App types ─────────────────────────────────────────────────────────────────
+
 #[derive(Deserialize)]
 struct Caption {
     text: String,
@@ -25,17 +80,124 @@ struct Caption {
 enum Message {
     CaptionReceived(String),
     ClearCaption,
+    SetEnabled(bool),
+    SetFontSize(FontSize),
 }
 
 struct State {
     caption: String,
+    enabled: bool,
+    font_size: FontSize,
 }
 
 impl Default for State {
     fn default() -> Self {
-        State { caption: String::new() }
+        State {
+            caption: String::new(),
+            enabled: true,
+            font_size: FontSize::Medium,
+        }
     }
 }
+
+// ── System tray ───────────────────────────────────────────────────────────────
+
+struct LyricsTray {
+    tx: mpsc::UnboundedSender<Message>,
+    enabled: bool,
+    font_size: FontSize,
+    position: Position,
+}
+
+impl ksni::Tray for LyricsTray {
+    fn icon_name(&self) -> String {
+        "audio-x-generic".into()
+    }
+    fn title(&self) -> String {
+        "Lyrics on Screen".into()
+    }
+    fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
+        use ksni::menu::*;
+        let pos = self.position;
+        let fs = self.font_size;
+        vec![
+            CheckmarkItem {
+                label: "Overlay ativo".into(),
+                checked: self.enabled,
+                activate: Box::new(|this: &mut Self| {
+                    this.enabled = !this.enabled;
+                    let _ = this.tx.unbounded_send(Message::SetEnabled(this.enabled));
+                }),
+                ..Default::default()
+            }
+            .into(),
+            MenuItem::Separator,
+            SubMenu {
+                label: "Posição".into(),
+                submenu: vec![
+                    RadioGroup {
+                        selected: pos.index(),
+                        select: Box::new(|this: &mut Self, idx| {
+                            this.position = match idx {
+                                0 => Position::Bottom,
+                                _ => Position::Top,
+                            };
+                            let _ = this
+                                .tx
+                                .unbounded_send(Message::AnchorChange(this.position.anchor()));
+                            let _ = this
+                                .tx
+                                .unbounded_send(Message::MarginChange(this.position.margin()));
+                        }),
+                        options: vec![
+                            RadioItem { label: "Baixo".into(), ..Default::default() },
+                            RadioItem { label: "Topo".into(), ..Default::default() },
+                        ],
+                    }
+                    .into(),
+                ],
+                ..Default::default()
+            }
+            .into(),
+            SubMenu {
+                label: "Tamanho da fonte".into(),
+                submenu: vec![
+                    RadioGroup {
+                        selected: fs.index(),
+                        select: Box::new(|this: &mut Self, idx| {
+                            this.font_size = match idx {
+                                0 => FontSize::Small,
+                                1 => FontSize::Medium,
+                                _ => FontSize::Large,
+                            };
+                            let _ = this
+                                .tx
+                                .unbounded_send(Message::SetFontSize(this.font_size));
+                        }),
+                        options: vec![
+                            RadioItem { label: "Pequeno".into(), ..Default::default() },
+                            RadioItem { label: "Médio".into(), ..Default::default() },
+                            RadioItem { label: "Grande".into(), ..Default::default() },
+                        ],
+                    }
+                    .into(),
+                ],
+                ..Default::default()
+            }
+            .into(),
+            MenuItem::Separator,
+            StandardItem {
+                label: "Sair".into(),
+                icon_name: "application-exit".into(),
+                activate: Box::new(|_| std::process::exit(0)),
+                ..Default::default()
+            }
+            .into(),
+        ]
+    }
+}
+
+// ── iced app ──────────────────────────────────────────────────────────────────
 
 fn main() -> iced_layershell::Result {
     iced_layershell::application(State::default, "lyrics-on-screen", update, view)
@@ -59,11 +221,22 @@ fn main() -> iced_layershell::Result {
 
 fn update(state: &mut State, msg: Message) -> Task<Message> {
     match msg {
-        Message::CaptionReceived(text) => {
-            state.caption = text;
+        Message::CaptionReceived(t) => {
+            if state.enabled {
+                state.caption = t;
+            }
         }
         Message::ClearCaption => {
             state.caption.clear();
+        }
+        Message::SetEnabled(e) => {
+            state.enabled = e;
+            if !e {
+                state.caption.clear();
+            }
+        }
+        Message::SetFontSize(s) => {
+            state.font_size = s;
         }
         _ => {}
     }
@@ -72,35 +245,51 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
 
 fn view(state: &State) -> Element<'_, Message> {
     container(
-        container(text(&state.caption).size(32).color(Color::WHITE))
-            .style(move |_theme| {
-                if state.caption.is_empty() {
-                    container::Style::default()
-                } else {
-                    container::Style {
-                        background: Some(iced::Background::Color(Color::from_rgba(
-                            0.0, 0.0, 0.0, 0.6,
-                        ))),
-                        border: iced::Border { radius: 6.0.into(), ..Default::default() },
-                        ..Default::default()
-                    }
+        container(
+            text(&state.caption)
+                .size(state.font_size.px())
+                .color(Color::WHITE),
+        )
+        .style(move |_theme| {
+            if state.caption.is_empty() {
+                container::Style::default()
+            } else {
+                container::Style {
+                    background: Some(iced::Background::Color(Color::from_rgba(
+                        0.0, 0.0, 0.0, 0.6,
+                    ))),
+                    border: iced::Border { radius: 6.0.into(), ..Default::default() },
+                    ..Default::default()
                 }
-            })
-            .padding([6, 14]),
+            }
+        })
+        .padding([6, 14]),
     )
     .center_x(iced::Fill)
     .center_y(iced::Fill)
     .into()
 }
 
+// ── WebSocket server + tray bootstrap ─────────────────────────────────────────
+
 fn ws_server_stream() -> BoxStream<'static, Message> {
     let (tx, rx) = mpsc::unbounded::<Message>();
 
+    // System tray — ksni manages its own D-Bus thread internally
+    ksni::TrayService::new(LyricsTray {
+        tx: tx.clone(),
+        enabled: true,
+        font_size: FontSize::Medium,
+        position: Position::Bottom,
+    })
+    .spawn();
+
+    // WebSocket server — needs its own tokio runtime (iced_layershell is not tokio)
     std::thread::spawn(move || {
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
-            .expect("Failed to build tokio runtime")
+            .expect("tokio runtime")
             .block_on(run_server(tx));
     });
 
@@ -119,7 +308,6 @@ async fn run_server(tx: mpsc::UnboundedSender<Message>) {
     };
     eprintln!("[lyrics-on-screen] WebSocket server listening on ws://127.0.0.1:{WS_PORT}");
 
-    // Shared handle to the active clear timer; aborted whenever a new caption arrives.
     let clear_handle: Arc<Mutex<Option<JoinHandle<()>>>> = Arc::new(Mutex::new(None));
 
     loop {
@@ -142,21 +330,18 @@ async fn run_server(tx: mpsc::UnboundedSender<Message>) {
                                         if caption.text.is_empty() {
                                             continue;
                                         }
+                                        let _ = tx
+                                            .unbounded_send(Message::CaptionReceived(caption.text));
 
-                                        let _ = tx.unbounded_send(
-                                            Message::CaptionReceived(caption.text),
-                                        );
-
-                                        // Cancel the previous clear timer and start a new one.
                                         let mut guard = clear_handle.lock().unwrap();
                                         if let Some(h) = guard.take() {
                                             h.abort();
                                         }
                                         let tx2 = tx.clone();
                                         *guard = Some(tokio::spawn(async move {
-                                            tokio::time::sleep(
-                                                std::time::Duration::from_secs(CLEAR_AFTER_SECS),
-                                            )
+                                            tokio::time::sleep(std::time::Duration::from_secs(
+                                                CLEAR_AFTER_SECS,
+                                            ))
                                             .await;
                                             let _ = tx2.unbounded_send(Message::ClearCaption);
                                         }));
