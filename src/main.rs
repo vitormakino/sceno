@@ -1,19 +1,18 @@
 use futures::channel::mpsc;
 use futures::stream::BoxStream;
-use futures::StreamExt;
 use iced::widget::{container, text};
 use iced::{Color, Element, Subscription, Task};
 use iced_layershell::reexport::{Anchor, KeyboardInteractivity, Layer};
 use iced_layershell::settings::LayerShellSettings;
 use iced_layershell::to_layer_message;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use std::io::Read;
 use std::sync::{Arc, Mutex};
-use tokio::net::TcpListener;
-use tokio::task::JoinHandle;
-use tokio_tungstenite::accept_async;
+use std::os::unix::io::AsRawFd;
+use std::time::Instant;
 
-const WS_PORT: u16 = 8765;
 const CLEAR_AFTER_SECS: u64 = 5;
+const LOCK_PATH: &str = "/tmp/lyrics-on-screen.lock";
 
 // ── Settings types ────────────────────────────────────────────────────────────
 
@@ -66,14 +65,149 @@ impl FontSize {
             FontSize::Large => 2,
         }
     }
+    fn from_idx(i: usize) -> Self {
+        match i {
+            0 => FontSize::Small,
+            2 => FontSize::Large,
+            _ => FontSize::Medium,
+        }
+    }
 }
 
-// ── App types ─────────────────────────────────────────────────────────────────
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Mode {
+    Live,
+    Timeline,
+}
 
-#[derive(Deserialize)]
-struct Caption {
+impl Mode {
+    fn index(self) -> usize {
+        match self {
+            Mode::Live => 0,
+            Mode::Timeline => 1,
+        }
+    }
+    fn from_idx(i: usize) -> Self {
+        if i == 1 { Mode::Timeline } else { Mode::Live }
+    }
+}
+
+// ── Persistent config ─────────────────────────────────────────────────────────
+
+#[derive(Serialize, Deserialize)]
+struct SavedConfig {
+    #[serde(default = "default_font_idx")]
+    font_size_idx: usize,
+    #[serde(default)]
+    mode_idx: usize,
+    #[serde(default = "default_enabled")]
+    enabled: bool,
+}
+
+fn default_font_idx() -> usize { 1 }
+fn default_enabled() -> bool { true }
+
+impl Default for SavedConfig {
+    fn default() -> Self {
+        SavedConfig { font_size_idx: 1, mode_idx: 0, enabled: true }
+    }
+}
+
+fn config_path() -> Option<std::path::PathBuf> {
+    std::env::var("HOME").ok().map(|home| {
+        std::path::PathBuf::from(home).join(".config/lyrics-on-screen/config.json")
+    })
+}
+
+fn load_config() -> SavedConfig {
+    config_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_config(state: &State) {
+    let Some(path) = config_path() else { return };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let cfg = SavedConfig {
+        font_size_idx: state.font_size.index(),
+        mode_idx: state.mode.index(),
+        enabled: state.enabled,
+    };
+    if let Ok(json) = serde_json::to_string(&cfg) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
+// ── Timeline types ────────────────────────────────────────────────────────────
+
+#[derive(Deserialize, Debug, Clone)]
+struct CueEntry {
+    start: f64,
+    end: f64,
     text: String,
 }
+
+/// Reference point that lets us extrapolate the current video position
+/// between sync messages from the extension.
+#[derive(Debug, Clone)]
+struct TimelineSync {
+    video_time: f64,
+    captured_at: Instant,
+    paused: bool,
+    playback_rate: f64,
+}
+
+impl TimelineSync {
+    fn current_time(&self) -> f64 {
+        if self.paused {
+            self.video_time
+        } else {
+            self.video_time + self.captured_at.elapsed().as_secs_f64() * self.playback_rate
+        }
+    }
+}
+
+fn cue_at(cues: &[CueEntry], t: f64) -> Option<&str> {
+    cues.iter()
+        .find(|c| c.start <= t && t < c.end)
+        .map(|c| c.text.as_str())
+}
+
+// ── Native message types ──────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum NativeMsg {
+    // Live mode: { "text": "...", "source": "..." }
+    Text { text: String },
+    // Timeline cue window: { "type": "cues", "cues": [...], "currentTime": ..., ... }
+    // Must come before Sync so the required `cues` field is checked first.
+    Cues {
+        cues: Vec<CueEntry>,
+        #[serde(rename = "currentTime")]
+        current_time: f64,
+        #[serde(default)]
+        paused: bool,
+        #[serde(rename = "playbackRate", default = "default_rate")]
+        playback_rate: f64,
+    },
+    // Sync heartbeat: { "type": "sync", "currentTime": ..., ... }
+    Sync {
+        #[serde(rename = "currentTime")]
+        current_time: f64,
+        #[serde(default)]
+        paused: bool,
+        #[serde(rename = "playbackRate", default = "default_rate")]
+        playback_rate: f64,
+    },
+}
+
+fn default_rate() -> f64 { 1.0 }
+
+// ── App types ─────────────────────────────────────────────────────────────────
 
 #[to_layer_message]
 #[derive(Debug, Clone)]
@@ -82,21 +216,44 @@ enum Message {
     ClearCaption,
     SetEnabled(bool),
     SetFontSize(FontSize),
+    SetMode(Mode),
+    CuesReceived(Vec<CueEntry>, TimelineSync),
+    SyncReceived(TimelineSync),
+    TimelineTick,
 }
 
 struct State {
     caption: String,
+    last_live_caption: String,
     enabled: bool,
     font_size: FontSize,
+    mode: Mode,
+    cues: Vec<CueEntry>,
+    timeline_sync: Option<TimelineSync>,
+    paused: bool,
 }
 
 impl Default for State {
     fn default() -> Self {
+        let cfg = load_config();
         State {
             caption: String::new(),
-            enabled: true,
-            font_size: FontSize::Medium,
+            last_live_caption: String::new(),
+            enabled: cfg.enabled,
+            font_size: FontSize::from_idx(cfg.font_size_idx),
+            mode: Mode::from_idx(cfg.mode_idx),
+            cues: Vec::new(),
+            timeline_sync: None,
+            paused: false,
         }
+    }
+}
+
+fn apply_timeline_caption(state: &mut State) {
+    if let Some(sync) = &state.timeline_sync {
+        state.caption = cue_at(&state.cues, sync.current_time())
+            .map(String::from)
+            .unwrap_or_default();
     }
 }
 
@@ -107,6 +264,7 @@ struct LyricsTray {
     enabled: bool,
     font_size: FontSize,
     position: Position,
+    mode: Mode,
 }
 
 impl ksni::Tray for LyricsTray {
@@ -120,6 +278,7 @@ impl ksni::Tray for LyricsTray {
         use ksni::menu::*;
         let pos = self.position;
         let fs = self.font_size;
+        let mode = self.mode;
         vec![
             CheckmarkItem {
                 label: "Overlay ativo".into(),
@@ -133,55 +292,68 @@ impl ksni::Tray for LyricsTray {
             .into(),
             MenuItem::Separator,
             SubMenu {
+                label: "Modo".into(),
+                submenu: vec![RadioGroup {
+                    selected: mode.index(),
+                    select: Box::new(|this: &mut Self, idx| {
+                        this.mode = if idx == 0 { Mode::Live } else { Mode::Timeline };
+                        let _ = this.tx.unbounded_send(Message::SetMode(this.mode));
+                    }),
+                    options: vec![
+                        RadioItem { label: "Live".into(), ..Default::default() },
+                        RadioItem { label: "Timeline".into(), ..Default::default() },
+                    ],
+                }
+                .into()],
+                ..Default::default()
+            }
+            .into(),
+            SubMenu {
                 label: "Posição".into(),
-                submenu: vec![
-                    RadioGroup {
-                        selected: pos.index(),
-                        select: Box::new(|this: &mut Self, idx| {
-                            this.position = match idx {
-                                0 => Position::Bottom,
-                                _ => Position::Top,
-                            };
-                            let _ = this
-                                .tx
-                                .unbounded_send(Message::AnchorChange(this.position.anchor()));
-                            let _ = this
-                                .tx
-                                .unbounded_send(Message::MarginChange(this.position.margin()));
-                        }),
-                        options: vec![
-                            RadioItem { label: "Baixo".into(), ..Default::default() },
-                            RadioItem { label: "Topo".into(), ..Default::default() },
-                        ],
-                    }
-                    .into(),
-                ],
+                submenu: vec![RadioGroup {
+                    selected: pos.index(),
+                    select: Box::new(|this: &mut Self, idx| {
+                        this.position = match idx {
+                            0 => Position::Bottom,
+                            _ => Position::Top,
+                        };
+                        let _ = this
+                            .tx
+                            .unbounded_send(Message::AnchorChange(this.position.anchor()));
+                        let _ = this
+                            .tx
+                            .unbounded_send(Message::MarginChange(this.position.margin()));
+                    }),
+                    options: vec![
+                        RadioItem { label: "Baixo".into(), ..Default::default() },
+                        RadioItem { label: "Topo".into(), ..Default::default() },
+                    ],
+                }
+                .into()],
                 ..Default::default()
             }
             .into(),
             SubMenu {
                 label: "Tamanho da fonte".into(),
-                submenu: vec![
-                    RadioGroup {
-                        selected: fs.index(),
-                        select: Box::new(|this: &mut Self, idx| {
-                            this.font_size = match idx {
-                                0 => FontSize::Small,
-                                1 => FontSize::Medium,
-                                _ => FontSize::Large,
-                            };
-                            let _ = this
-                                .tx
-                                .unbounded_send(Message::SetFontSize(this.font_size));
-                        }),
-                        options: vec![
-                            RadioItem { label: "Pequeno".into(), ..Default::default() },
-                            RadioItem { label: "Médio".into(), ..Default::default() },
-                            RadioItem { label: "Grande".into(), ..Default::default() },
-                        ],
-                    }
-                    .into(),
-                ],
+                submenu: vec![RadioGroup {
+                    selected: fs.index(),
+                    select: Box::new(|this: &mut Self, idx| {
+                        this.font_size = match idx {
+                            0 => FontSize::Small,
+                            1 => FontSize::Medium,
+                            _ => FontSize::Large,
+                        };
+                        let _ = this
+                            .tx
+                            .unbounded_send(Message::SetFontSize(this.font_size));
+                    }),
+                    options: vec![
+                        RadioItem { label: "Pequeno".into(), ..Default::default() },
+                        RadioItem { label: "Médio".into(), ..Default::default() },
+                        RadioItem { label: "Grande".into(), ..Default::default() },
+                    ],
+                }
+                .into()],
                 ..Default::default()
             }
             .into(),
@@ -199,9 +371,40 @@ impl ksni::Tray for LyricsTray {
 
 // ── iced app ──────────────────────────────────────────────────────────────────
 
+fn ensure_single_instance() {
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .open(LOCK_PATH)
+        .unwrap_or_else(|e| {
+            eprintln!("[lyrics-on-screen] não foi possível abrir lock file: {e}");
+            std::process::exit(1);
+        });
+    // LOCK_EX | LOCK_NB — exclusive, non-blocking
+    let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if ret != 0 {
+        eprintln!("[lyrics-on-screen] já está em execução");
+        std::process::exit(0);
+    }
+    // Keep fd open for the process lifetime; kernel releases the lock on exit.
+    std::mem::forget(file);
+}
+
 fn main() -> iced_layershell::Result {
+    ensure_single_instance();
     iced_layershell::application(State::default, "lyrics-on-screen", update, view)
-        .subscription(|_state| Subscription::run(ws_server_stream))
+        .subscription(|state| {
+            let native = Subscription::run(native_msg_stream);
+            // Only tick when playing — paused video doesn't need interpolation.
+            let needs_tick = state.mode == Mode::Timeline
+                && !state.cues.is_empty()
+                && !state.paused;
+            if needs_tick {
+                Subscription::batch([native, Subscription::run(timeline_tick_stream)])
+            } else {
+                native
+            }
+        })
         .style(|_state, _theme| iced::theme::Style {
             background_color: Color::TRANSPARENT,
             text_color: Color::WHITE,
@@ -222,21 +425,68 @@ fn main() -> iced_layershell::Result {
 fn update(state: &mut State, msg: Message) -> Task<Message> {
     match msg {
         Message::CaptionReceived(t) => {
-            if state.enabled {
+            state.last_live_caption = t.clone();
+            if state.enabled && state.mode == Mode::Live {
                 state.caption = t;
             }
         }
         Message::ClearCaption => {
-            state.caption.clear();
+            // Only the Live-mode auto-clear timer fires this; ignore in Timeline.
+            if state.mode == Mode::Live {
+                state.caption.clear();
+                state.last_live_caption.clear();
+            }
         }
         Message::SetEnabled(e) => {
             state.enabled = e;
             if !e {
                 state.caption.clear();
+            } else if state.mode == Mode::Live {
+                // Restore the last known caption immediately; avoids a blank
+                // screen until the next cuechange fires.
+                state.caption = state.last_live_caption.clone();
+            } else {
+                // Timeline: apply immediately from current sync position.
+                apply_timeline_caption(state);
             }
+            save_config(state);
         }
         Message::SetFontSize(s) => {
             state.font_size = s;
+            save_config(state);
+        }
+        Message::SetMode(m) => {
+            state.mode = m;
+            state.caption.clear();
+            if m == Mode::Live {
+                state.cues.clear();
+                state.timeline_sync = None;
+                state.paused = false;
+            }
+            save_config(state);
+        }
+        Message::CuesReceived(cues, sync) => {
+            state.paused = sync.paused;
+            state.cues = cues;
+            state.timeline_sync = Some(sync);
+            if state.mode == Mode::Timeline && state.enabled {
+                apply_timeline_caption(state);
+            }
+        }
+        Message::SyncReceived(sync) => {
+            state.paused = sync.paused;
+            state.timeline_sync = Some(sync);
+            if state.mode == Mode::Timeline && state.enabled {
+                apply_timeline_caption(state);
+            }
+        }
+        Message::TimelineTick => {
+            if state.mode == Mode::Timeline && state.enabled {
+                if let Some(sync) = &state.timeline_sync {
+                    state.caption =
+                        cue_at(&state.cues, sync.current_time()).map(String::from).unwrap_or_default();
+                }
+            }
         }
         _ => {}
     }
@@ -270,101 +520,102 @@ fn view(state: &State) -> Element<'_, Message> {
     .into()
 }
 
-// ── WebSocket server + tray bootstrap ─────────────────────────────────────────
+// ── Subscription streams ──────────────────────────────────────────────────────
 
-fn ws_server_stream() -> BoxStream<'static, Message> {
+fn native_msg_stream() -> BoxStream<'static, Message> {
     let (tx, rx) = mpsc::unbounded::<Message>();
+    let cfg = load_config();
 
-    // System tray — ksni manages its own D-Bus thread internally
     ksni::TrayService::new(LyricsTray {
         tx: tx.clone(),
-        enabled: true,
-        font_size: FontSize::Medium,
+        enabled: cfg.enabled,
+        font_size: FontSize::from_idx(cfg.font_size_idx),
         position: Position::Bottom,
+        mode: Mode::from_idx(cfg.mode_idx),
     })
     .spawn();
 
-    // WebSocket server — needs its own tokio runtime (iced_layershell is not tokio)
-    std::thread::spawn(move || {
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .expect("tokio runtime")
-            .block_on(run_server(tx));
-    });
+    std::thread::spawn(move || read_native_messages(tx));
 
     Box::pin(rx)
 }
 
-async fn run_server(tx: mpsc::UnboundedSender<Message>) {
-    let listener = loop {
-        match TcpListener::bind(("127.0.0.1", WS_PORT)).await {
-            Ok(l) => break l,
-            Err(e) => {
-                eprintln!("[lyrics-on-screen] bind failed: {e} — retrying in 5s");
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            }
+fn timeline_tick_stream() -> BoxStream<'static, Message> {
+    let (tx, rx) = mpsc::unbounded::<Message>();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        if tx.unbounded_send(Message::TimelineTick).is_err() {
+            break;
         }
-    };
-    eprintln!("[lyrics-on-screen] WebSocket server listening on ws://127.0.0.1:{WS_PORT}");
+    });
+    Box::pin(rx)
+}
 
-    let clear_handle: Arc<Mutex<Option<JoinHandle<()>>>> = Arc::new(Mutex::new(None));
+fn read_native_messages(tx: mpsc::UnboundedSender<Message>) {
+    // Use Instant for monotonic auto-clear timing; avoids sensitivity to clock changes.
+    let last_activity: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
+
+    {
+        let last_activity = last_activity.clone();
+        let tx = tx.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            let mut guard = last_activity.lock().unwrap();
+            if let Some(t) = *guard {
+                if t.elapsed().as_secs() >= CLEAR_AFTER_SECS {
+                    *guard = None;
+                    drop(guard);
+                    let _ = tx.unbounded_send(Message::ClearCaption);
+                }
+            }
+        });
+    }
+
+    let stdin = std::io::stdin();
+    let mut stdin = stdin.lock();
 
     loop {
-        match listener.accept().await {
-            Ok((stream, addr)) => {
-                let tx = tx.clone();
-                let clear_handle = clear_handle.clone();
-                tokio::spawn(async move {
-                    match accept_async(stream).await {
-                        Ok(mut ws) => {
-                            while let Some(result) = ws.next().await {
-                                match result {
-                                    Ok(msg) => {
-                                        let Ok(raw) = msg.to_text() else { continue };
-                                        let Ok(caption) =
-                                            serde_json::from_str::<Caption>(raw)
-                                        else {
-                                            continue;
-                                        };
-                                        if caption.text.is_empty() {
-                                            continue;
-                                        }
-                                        let _ = tx
-                                            .unbounded_send(Message::CaptionReceived(caption.text));
+        let mut len_buf = [0u8; 4];
+        if stdin.read_exact(&mut len_buf).is_err() {
+            break;
+        }
+        let len = u32::from_le_bytes(len_buf) as usize;
+        let mut buf = vec![0u8; len];
+        if stdin.read_exact(&mut buf).is_err() {
+            break;
+        }
 
-                                        let mut guard = clear_handle.lock().unwrap();
-                                        if let Some(h) = guard.take() {
-                                            h.abort();
-                                        }
-                                        let tx2 = tx.clone();
-                                        *guard = Some(tokio::spawn(async move {
-                                            tokio::time::sleep(std::time::Duration::from_secs(
-                                                CLEAR_AFTER_SECS,
-                                            ))
-                                            .await;
-                                            let _ = tx2.unbounded_send(Message::ClearCaption);
-                                        }));
-                                    }
-                                    Err(e) => {
-                                        eprintln!(
-                                            "[lyrics-on-screen] ws error from {addr}: {e}"
-                                        );
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("[lyrics-on-screen] handshake failed from {addr}: {e}");
-                        }
-                    }
-                });
+        let Ok(msg) = serde_json::from_slice::<NativeMsg>(&buf) else {
+            continue;
+        };
+
+        match msg {
+            NativeMsg::Text { text } if !text.is_empty() => {
+                *last_activity.lock().unwrap() = Some(Instant::now());
+                let _ = tx.unbounded_send(Message::CaptionReceived(text));
             }
-            Err(e) => {
-                eprintln!("[lyrics-on-screen] accept error: {e} — retrying in 1s");
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            NativeMsg::Cues { cues, current_time, paused, playback_rate } => {
+                let sync = TimelineSync {
+                    video_time: current_time,
+                    captured_at: Instant::now(),
+                    paused,
+                    playback_rate,
+                };
+                let _ = tx.unbounded_send(Message::CuesReceived(cues, sync));
             }
+            NativeMsg::Sync { current_time, paused, playback_rate } => {
+                let sync = TimelineSync {
+                    video_time: current_time,
+                    captured_at: Instant::now(),
+                    paused,
+                    playback_rate,
+                };
+                let _ = tx.unbounded_send(Message::SyncReceived(sync));
+            }
+            _ => {}
         }
     }
+
+    eprintln!("[lyrics-on-screen] stdin fechado — encerrando");
+    std::process::exit(0);
 }

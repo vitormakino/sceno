@@ -1,18 +1,12 @@
-let ws = null;
-let lastText = '';
+// rAF injection is handled by inject_raf.js (document_start, MAIN world)
 
-function connect() {
-  ws = new WebSocket('ws://127.0.0.1:8765');
-  ws.onopen = () => console.log('[lyrics-on-screen] ytmusic connected');
-  ws.onclose = () => setTimeout(connect, 3000);
-  ws.onerror = () => ws.close();
-}
+const bgPort = chrome.runtime.connect({ name: 'lyrics' });
+let lastText = '';
 
 function sendText(text) {
   if (text === lastText) return;
   lastText = text;
-  if (ws?.readyState === WebSocket.OPEN)
-    ws.send(JSON.stringify({ text, source: 'ytmusic' }));
+  bgPort.postMessage({ text, source: 'ytmusic' });
 }
 
 // Seletores para a linha de letra atualmente ativa.
@@ -59,6 +53,11 @@ function debugLyricsPanel() {
   });
 }
 
+function lyricsPanel() {
+  return document.querySelector('ytmusic-player-lyrics-panel') ||
+    document.querySelector('[class*="lyrics-panel"]');
+}
+
 function checkLyrics() {
   debugLyricsPanel();
   const text = findActiveLyric();
@@ -72,5 +71,7 @@ new MutationObserver(checkLyrics).observe(document.body, {
   attributeFilter: ['active', 'is-current', 'current-line', 'aria-current', 'data-is-current'],
 });
 
-setInterval(checkLyrics, 1000);
-connect();
+// Fallback polling — only runs when the lyrics panel is visible.
+setInterval(() => {
+  if (lyricsPanel()) checkLyrics();
+}, 2000);

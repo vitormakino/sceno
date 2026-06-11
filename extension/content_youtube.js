@@ -1,73 +1,95 @@
-// ── 1. rAF injection ─────────────────────────────────────────────────────────
-// Faz o YouTube acreditar que a aba está sempre visível e substitui
-// requestAnimationFrame por setTimeout no background (10fps).
-// Executado no contexto da página (main world) via tag <script>.
-const injectCode = `
-  const _hiddenDesc = Object.getOwnPropertyDescriptor(Document.prototype, 'hidden');
-  const isReallyHidden = _hiddenDesc ? _hiddenDesc.get.bind(document) : () => false;
-
-  Object.defineProperty(document, 'hidden',          { get: () => false, configurable: true });
-  Object.defineProperty(document, 'visibilityState', { get: () => 'visible', configurable: true });
-
-  const _raf = window.requestAnimationFrame.bind(window);
-  const _caf = window.cancelAnimationFrame.bind(window);
-  const _timers = new Set();
-
-  window.requestAnimationFrame = cb => {
-    if (isReallyHidden()) {
-      const id = setTimeout(() => { _timers.delete(id); cb(performance.now()); }, 100);
-      _timers.add(id);
-      return id;
-    }
-    return _raf(cb);
-  };
-  window.cancelAnimationFrame = id => {
-    if (_timers.has(id)) { _timers.delete(id); clearTimeout(id); }
-    else _caf(id);
-  };
-`;
-const _s = document.createElement('script');
-_s.textContent = injectCode;
-document.documentElement.appendChild(_s);
-_s.remove();
-
-// ── 2. WebSocket ──────────────────────────────────────────────────────────────
-let ws = null;
+// ── Native Messaging ──────────────────────────────────────────────────────────
+const bgPort = chrome.runtime.connect({ name: 'lyrics' });
 let lastText = '';
-
-function connect() {
-  ws = new WebSocket('ws://127.0.0.1:8765');
-  ws.onopen = () => console.log('[lyrics-on-screen] connected');
-  ws.onclose = () => setTimeout(connect, 3000);
-  ws.onerror = () => ws.close();
-}
+let trackActive = false; // true once a textTrack delivers at least one cue
 
 function sendText(text) {
   if (text === lastText) return;
   lastText = text;
-  if (ws?.readyState === WebSocket.OPEN)
-    ws.send(JSON.stringify({ text, source: 'youtube' }));
+  bgPort.postMessage({ text, source: 'youtube' });
 }
 
-// ── 3. video.textTracks — abordagem primária para background ──────────────────
-// cuechange é disparado pela timeline da mídia, não pelo renderer.
-// Funciona mesmo com a aba em background ou em outro workspace.
+// ── Timeline helpers ──────────────────────────────────────────────────────────
+
+function makeSyncPayload(video) {
+  return {
+    currentTime: video.currentTime,
+    wallTime: Date.now(),
+    paused: video.paused,
+    playbackRate: video.playbackRate,
+  };
+}
+
+// Key that identifies a cue window by its boundaries and size.
+// Avoids resending the same batch on every cuechange when the window hasn't moved.
+let lastCueWindowKey = '';
+
+function sendCueBatch(video, track) {
+  if (!track.cues?.length) return;
+  const seen = new Set();
+  const cues = Array.from(track.cues)
+    .map(c => ({
+      start: c.startTime,
+      end: c.endTime,
+      text: c.text.replace(/<[^>]*>/g, '').replace(/\n/g, ' ').trim(),
+    }))
+    .filter(c => c.text && !seen.has(`${c.start}:${c.text}`) && seen.add(`${c.start}:${c.text}`));
+  if (!cues.length) return;
+
+  const key = `${cues[0].start}:${cues[cues.length - 1].end}:${cues.length}`;
+  if (key === lastCueWindowKey) return;
+  lastCueWindowKey = key;
+
+  bgPort.postMessage({ type: 'cues', source: 'youtube', cues, ...makeSyncPayload(video) });
+}
+
+// YouTube may load cues lazily — poll until the window is populated, then send.
+function waitForCues(video, track, tries = 20) {
+  if (track.cues?.length) { sendCueBatch(video, track); return; }
+  if (tries > 0) setTimeout(() => waitForCues(video, track, tries - 1), 300);
+}
+
+// ── textTracks — primary (works in background, feeds both modes) ───────────────
 const seenTracks = new WeakSet();
 
-function attachTrack(track) {
+function attachTrack(video, track) {
   if (seenTracks.has(track)) return;
   seenTracks.add(track);
-  // 'hidden' dispara cuechange sem mostrar o overlay nativo do browser
   track.mode = 'hidden';
+
+  // Send any cue that is already active right now (covers the case where the
+  // app starts or the overlay is re-enabled mid-playback — cuechange won't
+  // fire again for a cue that was already active before we attached).
+  if (track.activeCues?.length) {
+    const seen = new Set();
+    const parts = Array.from(track.activeCues)
+      .map(c => c.text.replace(/<[^>]*>/g, '').replace(/\n/g, ' ').trim())
+      .filter(t => t && !seen.has(t) && seen.add(t));
+    if (parts.length) { trackActive = true; sendText(parts.join(' ')); }
+  }
+
+  // Timeline mode: send the initial cue window, then refresh on every cuechange.
+  // cuechange also fires when YouTube slides a rolling window, so this keeps
+  // the Rust-side cue list up to date without a separate polling loop.
+  waitForCues(video, track);
+
   track.addEventListener('cuechange', () => {
     const cues = track.activeCues;
-    if (!cues?.length) { sendText(''); return; }
-    sendText(
-      Array.from(cues)
-        .map(c => c.text.replace(/<[^>]*>/g, '').replace(/\n/g, ' '))
-        .join(' ')
-        .trim()
-    );
+
+    // Live mode: send the currently visible cue text.
+    if (cues?.length) {
+      const seen = new Set();
+      const parts = Array.from(cues)
+        .map(c => c.text.replace(/<[^>]*>/g, '').replace(/\n/g, ' ').trim())
+        .filter(t => t && !seen.has(t) && seen.add(t));
+      if (parts.length) {
+        trackActive = true;
+        sendText(parts.join(' '));
+      }
+    }
+
+    // Timeline mode: refresh the cue window only if it has actually changed.
+    sendCueBatch(video, track);
   });
 }
 
@@ -75,18 +97,29 @@ function watchTracks(video) {
   const scan = () => {
     for (const t of video.textTracks)
       if ((t.kind === 'subtitles' || t.kind === 'captions') && t.mode !== 'disabled')
-        attachTrack(t);
+        attachTrack(video, t);
   };
   scan();
   video.textTracks.addEventListener('change', scan);
+  setupSync(video);
 }
 
-// ── 4. MutationObserver — fallback se textTracks estiver vazio ────────────────
+// ── Sync heartbeat — keeps Timeline mode accurate between cue refreshes ────────
+function setupSync(video) {
+  const sendSync = () =>
+    bgPort.postMessage({ type: 'sync', source: 'youtube', ...makeSyncPayload(video) });
+
+  for (const ev of ['play', 'pause', 'seeked', 'ratechange'])
+    video.addEventListener(ev, sendSync);
+  setInterval(sendSync, 2000);
+}
+
+// ── MutationObserver — fallback when textTracks produces nothing ───────────────
 function setupObserver() {
   const container = document.querySelector('.ytp-caption-window-container');
   if (!container) { setTimeout(setupObserver, 1000); return; }
   new MutationObserver(() => {
-    // Tenta os dois seletores — YouTube muda nomes de classe entre versões
+    if (trackActive) return; // textTracks path is working — don't double-send
     const els = container.querySelectorAll('.ytp-caption-segment, .caption-visual-line');
     const text = els.length
       ? Array.from(els).map(e => e.textContent).join(' ').trim()
@@ -99,9 +132,8 @@ function setupObserver() {
 function setup() {
   const video = document.querySelector('video');
   if (!video) { setTimeout(setup, 1000); return; }
-  watchTracks(video);  // primário: funciona em background
-  setupObserver();     // secundário: cobre versões do YouTube sem textTracks
+  watchTracks(video);
+  setupObserver();
 }
 
-connect();
 setup();

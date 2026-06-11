@@ -1,0 +1,7 @@
+{
+  "name": "com.vitormakino.lyrics_on_screen",
+  "description": "Lyrics on Screen native messaging host",
+  "path": "BINARY_PATH",
+  "type": "stdio",
+  "allowed_origins": ["chrome-extension://EXTENSION_ID/"]
+}
