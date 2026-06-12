@@ -6,12 +6,13 @@ use iced_layershell::reexport::{Anchor, KeyboardInteractivity, Layer};
 use iced_layershell::settings::LayerShellSettings;
 use iced_layershell::to_layer_message;
 use serde::{Deserialize, Serialize};
-use std::io::Read;
-use std::sync::{Arc, Mutex};
 use std::os::unix::io::AsRawFd;
 use std::time::Instant;
 
-const CLEAR_AFTER_SECS: u64 = 5;
+mod lrc;
+mod lrclib;
+mod player;
+
 const LOCK_PATH: &str = "/tmp/lyrics-on-screen.lock";
 
 // ── Settings types ────────────────────────────────────────────────────────────
@@ -74,32 +75,12 @@ impl FontSize {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum Mode {
-    Live,
-    Timeline,
-}
-
-impl Mode {
-    fn index(self) -> usize {
-        match self {
-            Mode::Live => 0,
-            Mode::Timeline => 1,
-        }
-    }
-    fn from_idx(i: usize) -> Self {
-        if i == 1 { Mode::Timeline } else { Mode::Live }
-    }
-}
-
 // ── Persistent config ─────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize)]
 struct SavedConfig {
     #[serde(default = "default_font_idx")]
     font_size_idx: usize,
-    #[serde(default)]
-    mode_idx: usize,
     #[serde(default = "default_enabled")]
     enabled: bool,
 }
@@ -109,7 +90,7 @@ fn default_enabled() -> bool { true }
 
 impl Default for SavedConfig {
     fn default() -> Self {
-        SavedConfig { font_size_idx: 1, mode_idx: 0, enabled: true }
+        SavedConfig { font_size_idx: 1, enabled: true }
     }
 }
 
@@ -127,13 +108,13 @@ fn load_config() -> SavedConfig {
 }
 
 fn save_config(state: &State) {
+    if cfg!(test) { return; }
     let Some(path) = config_path() else { return };
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     let cfg = SavedConfig {
         font_size_idx: state.font_size.index(),
-        mode_idx: state.mode.index(),
         enabled: state.enabled,
     };
     if let Ok(json) = serde_json::to_string(&cfg) {
@@ -143,15 +124,15 @@ fn save_config(state: &State) {
 
 // ── Timeline types ────────────────────────────────────────────────────────────
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Debug, Clone)]
 struct CueEntry {
     start: f64,
     end: f64,
     text: String,
 }
 
-/// Reference point that lets us extrapolate the current video position
-/// between sync messages from the extension.
+/// Reference point that lets us extrapolate the current playback position
+/// between sync samples from the player.
 #[derive(Debug, Clone)]
 struct TimelineSync {
     video_time: f64,
@@ -176,47 +157,13 @@ fn cue_at(cues: &[CueEntry], t: f64) -> Option<&str> {
         .map(|c| c.text.as_str())
 }
 
-// ── Native message types ──────────────────────────────────────────────────────
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum NativeMsg {
-    // Live mode: { "text": "...", "source": "..." }
-    Text { text: String },
-    // Timeline cue window: { "type": "cues", "cues": [...], "currentTime": ..., ... }
-    // Must come before Sync so the required `cues` field is checked first.
-    Cues {
-        cues: Vec<CueEntry>,
-        #[serde(rename = "currentTime")]
-        current_time: f64,
-        #[serde(default)]
-        paused: bool,
-        #[serde(rename = "playbackRate", default = "default_rate")]
-        playback_rate: f64,
-    },
-    // Sync heartbeat: { "type": "sync", "currentTime": ..., ... }
-    Sync {
-        #[serde(rename = "currentTime")]
-        current_time: f64,
-        #[serde(default)]
-        paused: bool,
-        #[serde(rename = "playbackRate", default = "default_rate")]
-        playback_rate: f64,
-    },
-}
-
-fn default_rate() -> f64 { 1.0 }
-
 // ── App types ─────────────────────────────────────────────────────────────────
 
 #[to_layer_message]
 #[derive(Debug, Clone)]
 enum Message {
-    CaptionReceived(String),
-    ClearCaption,
     SetEnabled(bool),
     SetFontSize(FontSize),
-    SetMode(Mode),
     CuesReceived(Vec<CueEntry>, TimelineSync),
     SyncReceived(TimelineSync),
     TimelineTick,
@@ -224,10 +171,8 @@ enum Message {
 
 struct State {
     caption: String,
-    last_live_caption: String,
     enabled: bool,
     font_size: FontSize,
-    mode: Mode,
     cues: Vec<CueEntry>,
     timeline_sync: Option<TimelineSync>,
     paused: bool,
@@ -238,10 +183,8 @@ impl Default for State {
         let cfg = load_config();
         State {
             caption: String::new(),
-            last_live_caption: String::new(),
             enabled: cfg.enabled,
             font_size: FontSize::from_idx(cfg.font_size_idx),
-            mode: Mode::from_idx(cfg.mode_idx),
             cues: Vec::new(),
             timeline_sync: None,
             paused: false,
@@ -249,6 +192,7 @@ impl Default for State {
     }
 }
 
+/// Recompute the visible caption from the current cues and sync position.
 fn apply_timeline_caption(state: &mut State) {
     if let Some(sync) = &state.timeline_sync {
         state.caption = cue_at(&state.cues, sync.current_time())
@@ -264,7 +208,6 @@ struct LyricsTray {
     enabled: bool,
     font_size: FontSize,
     position: Position,
-    mode: Mode,
 }
 
 impl ksni::Tray for LyricsTray {
@@ -278,7 +221,6 @@ impl ksni::Tray for LyricsTray {
         use ksni::menu::*;
         let pos = self.position;
         let fs = self.font_size;
-        let mode = self.mode;
         vec![
             CheckmarkItem {
                 label: "Overlay ativo".into(),
@@ -291,23 +233,6 @@ impl ksni::Tray for LyricsTray {
             }
             .into(),
             MenuItem::Separator,
-            SubMenu {
-                label: "Modo".into(),
-                submenu: vec![RadioGroup {
-                    selected: mode.index(),
-                    select: Box::new(|this: &mut Self, idx| {
-                        this.mode = if idx == 0 { Mode::Live } else { Mode::Timeline };
-                        let _ = this.tx.unbounded_send(Message::SetMode(this.mode));
-                    }),
-                    options: vec![
-                        RadioItem { label: "Live".into(), ..Default::default() },
-                        RadioItem { label: "Timeline".into(), ..Default::default() },
-                    ],
-                }
-                .into()],
-                ..Default::default()
-            }
-            .into(),
             SubMenu {
                 label: "Posição".into(),
                 submenu: vec![RadioGroup {
@@ -375,6 +300,7 @@ fn ensure_single_instance() {
     let file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
+        .truncate(false)
         .open(LOCK_PATH)
         .unwrap_or_else(|e| {
             eprintln!("[lyrics-on-screen] não foi possível abrir lock file: {e}");
@@ -394,15 +320,13 @@ fn main() -> iced_layershell::Result {
     ensure_single_instance();
     iced_layershell::application(State::default, "lyrics-on-screen", update, view)
         .subscription(|state| {
-            let native = Subscription::run(native_msg_stream);
-            // Only tick when playing — paused video doesn't need interpolation.
-            let needs_tick = state.mode == Mode::Timeline
-                && !state.cues.is_empty()
-                && !state.paused;
+            let events = Subscription::run(event_stream);
+            // Only tick when playing — paused playback needs no interpolation.
+            let needs_tick = state.enabled && !state.cues.is_empty() && !state.paused;
             if needs_tick {
-                Subscription::batch([native, Subscription::run(timeline_tick_stream)])
+                Subscription::batch([events, Subscription::run(timeline_tick_stream)])
             } else {
-                native
+                events
             }
         })
         .style(|_state, _theme| iced::theme::Style {
@@ -424,30 +348,13 @@ fn main() -> iced_layershell::Result {
 
 fn update(state: &mut State, msg: Message) -> Task<Message> {
     match msg {
-        Message::CaptionReceived(t) => {
-            state.last_live_caption = t.clone();
-            if state.enabled && state.mode == Mode::Live {
-                state.caption = t;
-            }
-        }
-        Message::ClearCaption => {
-            // Only the Live-mode auto-clear timer fires this; ignore in Timeline.
-            if state.mode == Mode::Live {
-                state.caption.clear();
-                state.last_live_caption.clear();
-            }
-        }
         Message::SetEnabled(e) => {
             state.enabled = e;
-            if !e {
-                state.caption.clear();
-            } else if state.mode == Mode::Live {
-                // Restore the last known caption immediately; avoids a blank
-                // screen until the next cuechange fires.
-                state.caption = state.last_live_caption.clone();
-            } else {
-                // Timeline: apply immediately from current sync position.
+            if e {
+                // Show the cue for the current position immediately.
                 apply_timeline_caption(state);
+            } else {
+                state.caption.clear();
             }
             save_config(state);
         }
@@ -455,37 +362,24 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
             state.font_size = s;
             save_config(state);
         }
-        Message::SetMode(m) => {
-            state.mode = m;
-            state.caption.clear();
-            if m == Mode::Live {
-                state.cues.clear();
-                state.timeline_sync = None;
-                state.paused = false;
-            }
-            save_config(state);
-        }
         Message::CuesReceived(cues, sync) => {
             state.paused = sync.paused;
             state.cues = cues;
             state.timeline_sync = Some(sync);
-            if state.mode == Mode::Timeline && state.enabled {
+            if state.enabled {
                 apply_timeline_caption(state);
             }
         }
         Message::SyncReceived(sync) => {
             state.paused = sync.paused;
             state.timeline_sync = Some(sync);
-            if state.mode == Mode::Timeline && state.enabled {
+            if state.enabled {
                 apply_timeline_caption(state);
             }
         }
         Message::TimelineTick => {
-            if state.mode == Mode::Timeline && state.enabled {
-                if let Some(sync) = &state.timeline_sync {
-                    state.caption =
-                        cue_at(&state.cues, sync.current_time()).map(String::from).unwrap_or_default();
-                }
+            if state.enabled {
+                apply_timeline_caption(state);
             }
         }
         _ => {}
@@ -522,7 +416,7 @@ fn view(state: &State) -> Element<'_, Message> {
 
 // ── Subscription streams ──────────────────────────────────────────────────────
 
-fn native_msg_stream() -> BoxStream<'static, Message> {
+fn event_stream() -> BoxStream<'static, Message> {
     let (tx, rx) = mpsc::unbounded::<Message>();
     let cfg = load_config();
 
@@ -531,11 +425,10 @@ fn native_msg_stream() -> BoxStream<'static, Message> {
         enabled: cfg.enabled,
         font_size: FontSize::from_idx(cfg.font_size_idx),
         position: Position::Bottom,
-        mode: Mode::from_idx(cfg.mode_idx),
     })
     .spawn();
 
-    std::thread::spawn(move || read_native_messages(tx));
+    std::thread::spawn(move || player::run(tx));
 
     Box::pin(rx)
 }
@@ -551,71 +444,258 @@ fn timeline_tick_stream() -> BoxStream<'static, Message> {
     Box::pin(rx)
 }
 
-fn read_native_messages(tx: mpsc::UnboundedSender<Message>) {
-    // Use Instant for monotonic auto-clear timing; avoids sensitivity to clock changes.
-    let last_activity: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
+// ── Tests ─────────────────────────────────────────────────────────────────────
 
-    {
-        let last_activity = last_activity.clone();
-        let tx = tx.clone();
-        std::thread::spawn(move || loop {
-            std::thread::sleep(std::time::Duration::from_secs(1));
-            let mut guard = last_activity.lock().unwrap();
-            if let Some(t) = *guard {
-                if t.elapsed().as_secs() >= CLEAR_AFTER_SECS {
-                    *guard = None;
-                    drop(guard);
-                    let _ = tx.unbounded_send(Message::ClearCaption);
-                }
-            }
-        });
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn test_state() -> State {
+        State {
+            caption: String::new(),
+            enabled: true,
+            font_size: FontSize::Medium,
+            cues: Vec::new(),
+            timeline_sync: None,
+            paused: false,
+        }
     }
 
-    let stdin = std::io::stdin();
-    let mut stdin = stdin.lock();
+    fn paused_sync(t: f64) -> TimelineSync {
+        TimelineSync { video_time: t, captured_at: Instant::now(), paused: true, playback_rate: 1.0 }
+    }
 
-    loop {
-        let mut len_buf = [0u8; 4];
-        if stdin.read_exact(&mut len_buf).is_err() {
-            break;
-        }
-        let len = u32::from_le_bytes(len_buf) as usize;
-        let mut buf = vec![0u8; len];
-        if stdin.read_exact(&mut buf).is_err() {
-            break;
-        }
+    fn sample_cues() -> Vec<CueEntry> {
+        vec![
+            CueEntry { start: 1.0, end: 3.0, text: "hello".into() },
+            CueEntry { start: 3.0, end: 5.0, text: "world".into() },
+            CueEntry { start: 5.0, end: 7.0, text: "foo".into() },
+        ]
+    }
 
-        let Ok(msg) = serde_json::from_slice::<NativeMsg>(&buf) else {
-            continue;
+    // ── cue_at ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn cue_at_returns_active_cue() {
+        let cues = sample_cues();
+        assert_eq!(cue_at(&cues, 1.0), Some("hello"));
+        assert_eq!(cue_at(&cues, 2.9), Some("hello"));
+        assert_eq!(cue_at(&cues, 3.0), Some("world")); // start é inclusivo
+        assert_eq!(cue_at(&cues, 4.5), Some("world"));
+        assert_eq!(cue_at(&cues, 6.0), Some("foo"));
+    }
+
+    #[test]
+    fn cue_at_none_outside_cues() {
+        let cues = vec![
+            CueEntry { start: 1.0, end: 2.0, text: "a".into() },
+            CueEntry { start: 3.0, end: 4.0, text: "b".into() },
+        ];
+        assert_eq!(cue_at(&cues, 0.5), None);
+        assert_eq!(cue_at(&cues, 2.0), None); // end é exclusivo
+        assert_eq!(cue_at(&cues, 2.5), None); // gap entre cues
+        assert_eq!(cue_at(&cues, 4.0), None);
+    }
+
+    #[test]
+    fn cue_at_empty_list() {
+        assert_eq!(cue_at(&[], 1.0), None);
+    }
+
+    // ── TimelineSync::current_time ────────────────────────────────────────────
+
+    #[test]
+    fn current_time_fixed_when_paused() {
+        let sync = paused_sync(42.5);
+        assert_eq!(sync.current_time(), 42.5);
+    }
+
+    #[test]
+    fn current_time_advances_when_playing() {
+        let sync = TimelineSync {
+            video_time: 10.0,
+            captured_at: Instant::now() - Duration::from_secs(2),
+            paused: false,
+            playback_rate: 1.0,
         };
+        let t = sync.current_time();
+        assert!((12.0..12.1).contains(&t), "expected ~12.0, got {t}");
+    }
 
-        match msg {
-            NativeMsg::Text { text } if !text.is_empty() => {
-                *last_activity.lock().unwrap() = Some(Instant::now());
-                let _ = tx.unbounded_send(Message::CaptionReceived(text));
-            }
-            NativeMsg::Cues { cues, current_time, paused, playback_rate } => {
-                let sync = TimelineSync {
-                    video_time: current_time,
-                    captured_at: Instant::now(),
-                    paused,
-                    playback_rate,
-                };
-                let _ = tx.unbounded_send(Message::CuesReceived(cues, sync));
-            }
-            NativeMsg::Sync { current_time, paused, playback_rate } => {
-                let sync = TimelineSync {
-                    video_time: current_time,
-                    captured_at: Instant::now(),
-                    paused,
-                    playback_rate,
-                };
-                let _ = tx.unbounded_send(Message::SyncReceived(sync));
-            }
-            _ => {}
+    #[test]
+    fn current_time_respects_playback_rate() {
+        let sync = TimelineSync {
+            video_time: 0.0,
+            captured_at: Instant::now() - Duration::from_secs(2),
+            paused: false,
+            playback_rate: 2.0,
+        };
+        let t = sync.current_time();
+        assert!((4.0..4.1).contains(&t), "2× speed: expected ~4.0, got {t}");
+    }
+
+    // ── apply_timeline_caption ────────────────────────────────────────────────
+
+    #[test]
+    fn apply_sets_matching_cue() {
+        let mut s = test_state();
+        s.cues = sample_cues();
+        s.timeline_sync = Some(paused_sync(2.0));
+        apply_timeline_caption(&mut s);
+        assert_eq!(s.caption, "hello");
+    }
+
+    #[test]
+    fn apply_clears_when_no_cue_matches() {
+        let mut s = test_state();
+        s.caption = "stale".into();
+        s.cues = sample_cues();
+        s.timeline_sync = Some(paused_sync(0.0)); // antes do primeiro cue
+        apply_timeline_caption(&mut s);
+        assert_eq!(s.caption, "");
+    }
+
+    #[test]
+    fn apply_noop_without_sync() {
+        let mut s = test_state();
+        s.caption = "existing".into();
+        s.cues = sample_cues();
+        s.timeline_sync = None;
+        apply_timeline_caption(&mut s);
+        assert_eq!(s.caption, "existing"); // não muda sem sync
+    }
+
+    // ── SetEnabled ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn set_enabled_false_clears_caption() {
+        let mut s = test_state();
+        s.caption = "something".into();
+        let _ = update(&mut s, Message::SetEnabled(false));
+        assert_eq!(s.caption, "");
+        assert!(!s.enabled);
+    }
+
+    #[test]
+    fn set_enabled_true_applies_current_cue() {
+        let mut s = test_state();
+        s.enabled = false;
+        s.cues = sample_cues();
+        s.timeline_sync = Some(paused_sync(4.0));
+        let _ = update(&mut s, Message::SetEnabled(true));
+        assert_eq!(s.caption, "world");
+        assert!(s.enabled);
+    }
+
+    #[test]
+    fn set_enabled_true_no_sync_stays_empty() {
+        let mut s = test_state();
+        s.enabled = false;
+        s.cues = sample_cues();
+        s.timeline_sync = None;
+        let _ = update(&mut s, Message::SetEnabled(true));
+        assert_eq!(s.caption, "");
+    }
+
+    // ── CuesReceived ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn cues_received_updates_caption_and_paused() {
+        let mut s = test_state();
+        let sync = paused_sync(2.0);
+        let _ = update(&mut s, Message::CuesReceived(sample_cues(), sync));
+        assert_eq!(s.caption, "hello");
+        assert!(s.paused);
+    }
+
+    #[test]
+    fn cues_received_silent_when_disabled() {
+        let mut s = test_state();
+        s.enabled = false;
+        let _ = update(&mut s, Message::CuesReceived(sample_cues(), paused_sync(2.0)));
+        assert_eq!(s.caption, "");
+    }
+
+    // ── SyncReceived ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn sync_received_updates_caption() {
+        let mut s = test_state();
+        s.cues = sample_cues();
+        let _ = update(&mut s, Message::SyncReceived(paused_sync(6.5)));
+        assert_eq!(s.caption, "foo");
+    }
+
+    #[test]
+    fn sync_received_silent_when_disabled() {
+        let mut s = test_state();
+        s.enabled = false;
+        s.cues = sample_cues();
+        let _ = update(&mut s, Message::SyncReceived(paused_sync(2.0)));
+        assert_eq!(s.caption, "");
+    }
+
+    // ── TimelineTick ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn timeline_tick_updates_caption() {
+        let mut s = test_state();
+        s.cues = sample_cues();
+        s.timeline_sync = Some(paused_sync(3.5));
+        let _ = update(&mut s, Message::TimelineTick);
+        assert_eq!(s.caption, "world");
+    }
+
+    #[test]
+    fn timeline_tick_silent_when_disabled() {
+        let mut s = test_state();
+        s.enabled = false;
+        s.cues = sample_cues();
+        s.timeline_sync = Some(paused_sync(3.5));
+        let _ = update(&mut s, Message::TimelineTick);
+        assert_eq!(s.caption, "");
+    }
+
+    // ── FontSize helpers ──────────────────────────────────────────────────────
+
+    #[test]
+    fn fontsize_from_idx_roundtrips() {
+        for (i, expected) in [(0, FontSize::Small), (1, FontSize::Medium), (2, FontSize::Large)] {
+            assert_eq!(FontSize::from_idx(i), expected);
+            assert_eq!(expected.index(), i);
         }
     }
 
-    eprintln!("[lyrics-on-screen] stdin fechado — encerrando");
-    std::process::exit(0);
+    #[test]
+    fn fontsize_unknown_idx_defaults_to_medium() {
+        assert_eq!(FontSize::from_idx(99), FontSize::Medium);
+    }
+
+    // ── SavedConfig serialization ─────────────────────────────────────────────
+
+    #[test]
+    fn saved_config_roundtrips_json() {
+        let cfg = SavedConfig { font_size_idx: 2, enabled: false };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let loaded: SavedConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.font_size_idx, 2);
+        assert!(!loaded.enabled);
+    }
+
+    #[test]
+    fn saved_config_missing_fields_use_defaults() {
+        let cfg: SavedConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(cfg.font_size_idx, 1);  // Medium
+        assert!(cfg.enabled);
+    }
+
+    #[test]
+    fn saved_config_ignores_legacy_mode_idx() {
+        // Old configs carried a mode_idx field; it must be ignored, not rejected.
+        let cfg: SavedConfig =
+            serde_json::from_str(r#"{"font_size_idx":2,"mode_idx":1,"enabled":true}"#).unwrap();
+        assert_eq!(cfg.font_size_idx, 2);
+        assert!(cfg.enabled);
+    }
 }
