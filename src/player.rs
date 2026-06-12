@@ -24,17 +24,22 @@ const NOISE_WORDS: &[&str] = &[
     "hd", "4k", "mv", "clip", "color", "colour", "performance", "version",
 ];
 
-/// Build a lyrics query from raw MPRIS metadata fields, cleaning the YouTube/VEVO
-/// decorations that otherwise wreck LRCLIB lookups: channel-name artists
-/// (`TimbalandVEVO`, `… - Topic`), bracketed tags (`[OFFICIAL VIDEO]`),
-/// featuring suffixes (`ft. …`), and an `Artist - ` title prefix. When the
-/// player exposes no artist, an `Artist - Title` shape is split. Returns `None`
-/// if there's no usable title.
+/// Build a lyrics query from raw MPRIS metadata fields, cleaning the decorations
+/// that otherwise wreck LRCLIB lookups: bracketed tags (`[OFFICIAL VIDEO]`),
+/// featuring suffixes (`ft. …`), and channel-name artists.
+///
+/// `from_browser` flags an unreliable artist field: browser tabs report the
+/// channel/label (`Roadrunner Records`, `systemofadownVEVO`) rather than the
+/// performer, but their title is reliably `Artist - Song` — so we take the
+/// artist from the title and ignore the metadata. Native players (Spotify, mpv)
+/// have trustworthy tags, so we keep their artist and leave the title intact
+/// (safe for `Numb - Remastered`). Returns `None` if there's no usable title.
 pub fn build_query(
     title: Option<String>,
     artists: Vec<String>,
     album: Option<String>,
     length_secs: Option<u64>,
+    from_browser: bool,
 ) -> Option<TrackQuery> {
     let raw_title = title.map(|t| t.trim().to_string()).filter(|t| !t.is_empty())?;
 
@@ -43,7 +48,7 @@ pub fn build_query(
         .map(|a| clean_artist(&a))
         .find(|a| !a.is_empty());
 
-    let (artist, title) = split_artist_title(clean_title(&raw_title), meta_artist);
+    let (artist, title) = resolve_artist_title(clean_title(&raw_title), meta_artist, from_browser);
 
     Some(TrackQuery {
         artist,
@@ -54,36 +59,22 @@ pub fn build_query(
 }
 
 /// Resolve artist/title from a cleaned title and an optional metadata artist.
-///
-/// YouTube titles are usually `Artist - Song`, and the channel-name artist
-/// (`systemofadownVEVO`) is unreliable. So when the title's left side matches
-/// the metadata artist ignoring case/spacing/punctuation, we adopt the title's
-/// well-formatted name. With no metadata artist we assume `Artist - Song`.
-/// Otherwise we trust the metadata artist and leave the title untouched — safe
-/// for Spotify titles like `Numb - Remastered` that are not `Artist - Song`.
-fn split_artist_title(title: String, meta_artist: Option<String>) -> (String, String) {
-    if let Some((left, right)) = title.split_once(" - ") {
-        let (left, right) = (left.trim(), right.trim());
-        if !left.is_empty() && !right.is_empty() {
-            let take_title_split = match &meta_artist {
-                Some(a) => normalize(a) == normalize(left),
-                None => true,
-            };
-            if take_title_split {
+/// For browsers (and when no metadata artist is known) an `Artist - Song` title
+/// is split; otherwise the metadata artist is trusted and the title left intact.
+fn resolve_artist_title(
+    title: String,
+    meta_artist: Option<String>,
+    from_browser: bool,
+) -> (String, String) {
+    if from_browser || meta_artist.is_none() {
+        if let Some((left, right)) = title.split_once(" - ") {
+            let (left, right) = (left.trim(), right.trim());
+            if !left.is_empty() && !right.is_empty() {
                 return (left.to_string(), right.to_string());
             }
         }
     }
     (meta_artist.unwrap_or_default(), title)
-}
-
-/// Lowercased alphanumeric-only form, for comparing artist names that differ
-/// only in spacing/casing/punctuation (`systemofadown` vs `System Of A Down`).
-fn normalize(s: &str) -> String {
-    s.chars()
-        .filter(|c| c.is_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect()
 }
 
 /// Strip channel-name cruft from an artist: a `VEVO` suffix or a ` - Topic`
@@ -118,6 +109,15 @@ fn clean_title(s: &str) -> String {
 fn contains_noise(inner: &str) -> bool {
     let lower = inner.to_lowercase();
     NOISE_WORDS.iter().any(|w| lower.contains(w))
+}
+
+/// Whether an MPRIS player identity is a web browser (whose artist metadata is
+/// the channel/label, not the performer).
+fn is_browser(identity: &str) -> bool {
+    let id = identity.to_lowercase();
+    ["chrome", "chromium", "firefox", "mozilla", "brave", "edge", "vivaldi", "opera"]
+        .iter()
+        .any(|b| id.contains(b))
 }
 
 /// Remove `open…close` groups, keeping a group only when `keep_if(inner)` holds.
@@ -211,6 +211,7 @@ fn track_active_player(finder: &PlayerFinder, tx: &UnboundedSender<Message>) {
                 .unwrap_or_default(),
             metadata.album_name().map(str::to_string),
             metadata.length().map(|d| d.as_secs()),
+            is_browser(player.identity()),
         );
 
         let paused = !matches!(
@@ -281,11 +282,13 @@ mod tests {
 
     #[test]
     fn build_query_uses_explicit_artist() {
+        // Native player (trustworthy tags): keep the metadata artist.
         let q = build_query(
             Some("Dreams".into()),
             vec!["Fleetwood Mac".into()],
             Some("Rumours".into()),
             Some(257),
+            false,
         )
         .unwrap();
         assert_eq!(q.artist, "Fleetwood Mac");
@@ -296,21 +299,21 @@ mod tests {
 
     #[test]
     fn build_query_splits_artist_from_title_when_missing() {
-        let q = build_query(Some("Daft Punk - Get Lucky".into()), vec![], None, None).unwrap();
+        let q = build_query(Some("Daft Punk - Get Lucky".into()), vec![], None, None, false).unwrap();
         assert_eq!(q.artist, "Daft Punk");
         assert_eq!(q.title, "Get Lucky");
     }
 
     #[test]
     fn build_query_keeps_title_when_no_separator() {
-        let q = build_query(Some("Untitled".into()), vec![], None, None).unwrap();
+        let q = build_query(Some("Untitled".into()), vec![], None, None, true).unwrap();
         assert_eq!(q.artist, "");
         assert_eq!(q.title, "Untitled");
     }
 
     #[test]
     fn build_query_ignores_blank_artists() {
-        let q = build_query(Some("Song".into()), vec!["   ".into()], None, None).unwrap();
+        let q = build_query(Some("Song".into()), vec!["   ".into()], None, None, false).unwrap();
         // blank artist falls through to title-splitting, which has no separator
         assert_eq!(q.artist, "");
         assert_eq!(q.title, "Song");
@@ -318,13 +321,13 @@ mod tests {
 
     #[test]
     fn build_query_none_without_title() {
-        assert!(build_query(None, vec!["Artist".into()], None, None).is_none());
-        assert!(build_query(Some("  ".into()), vec![], None, None).is_none());
+        assert!(build_query(None, vec!["Artist".into()], None, None, false).is_none());
+        assert!(build_query(Some("  ".into()), vec![], None, None, true).is_none());
     }
 
     #[test]
     fn build_query_drops_zero_duration_and_empty_album() {
-        let q = build_query(Some("S".into()), vec!["A".into()], Some("".into()), Some(0)).unwrap();
+        let q = build_query(Some("S".into()), vec!["A".into()], Some("".into()), Some(0), false).unwrap();
         assert_eq!(q.album, None);
         assert_eq!(q.duration, None);
     }
@@ -356,13 +359,15 @@ mod tests {
     }
 
     #[test]
-    fn build_query_cleans_youtube_vevo_metadata() {
-        // The exact shape observed live from a Chromium YouTube tab.
+    fn build_query_browser_takes_artist_from_title() {
+        // Browser tab: the channel/VEVO artist is ignored; the title is split.
+        // (Featuring suffix and decorations are cleaned first.)
         let q = build_query(
             Some("Timbaland - Apologize ft. OneRepublic".into()),
             vec!["TimbalandVEVO".into()],
             None,
             Some(188),
+            true,
         )
         .unwrap();
         assert_eq!(q.artist, "Timbaland");
@@ -370,12 +375,13 @@ mod tests {
     }
 
     #[test]
-    fn build_query_strips_artist_prefix_from_title() {
+    fn build_query_browser_strips_decorations_and_prefix() {
         let q = build_query(
             Some("Slipknot - Vermilion Pt. 2 [OFFICIAL VIDEO] [HD]".into()),
             vec!["Slipknot".into()],
             None,
             Some(232),
+            true,
         )
         .unwrap();
         assert_eq!(q.artist, "Slipknot");
@@ -383,38 +389,50 @@ mod tests {
     }
 
     #[test]
-    fn build_query_matches_concatenated_vevo_channel_to_title() {
-        // Channel artist is concatenated/lowercased and only matches the title's
-        // left side after normalization.
+    fn build_query_browser_ignores_label_artist() {
+        // Observed live: Chrome reported the record label as the artist, while
+        // the real performer was the title prefix. The title must win.
         let q = build_query(
-            Some("System Of A Down - Lonely Day (Official HD Video)".into()),
-            vec!["systemofadownVEVO".into()],
+            Some("Stone Sour - Through Glass".into()),
+            vec!["Roadrunner Records".into()],
             None,
-            Some(165),
+            Some(257),
+            true,
         )
         .unwrap();
-        assert_eq!(q.artist, "System Of A Down");
-        assert_eq!(q.title, "Lonely Day");
+        assert_eq!(q.artist, "Stone Sour");
+        assert_eq!(q.title, "Through Glass");
+    }
+
+    #[test]
+    fn build_query_native_keeps_dash_title_intact() {
+        // Spotify-style "Song - Remastered" from a native player: the metadata
+        // artist is trusted and the title is not split.
+        let q = build_query(
+            Some("Numb - Remastered".into()),
+            vec!["Linkin Park".into()],
+            None,
+            Some(187),
+            false,
+        )
+        .unwrap();
+        assert_eq!(q.artist, "Linkin Park");
+        assert_eq!(q.title, "Numb - Remastered");
+    }
+
+    #[test]
+    fn is_browser_detects_common_browsers() {
+        for id in ["Chrome", "Chromium", "Mozilla Firefox", "Brave"] {
+            assert!(is_browser(id), "{id} should be a browser");
+        }
+        for id in ["Spotify", "mpv", "VLC media player"] {
+            assert!(!is_browser(id), "{id} should not be a browser");
+        }
     }
 
     #[test]
     fn fetch_cues_empty_for_missing_query() {
         // A `None` query short-circuits before any network access.
         assert!(fetch_cues(&None).is_empty());
-    }
-
-    #[test]
-    fn build_query_does_not_split_non_artist_dash_titles() {
-        // Spotify-style "Song - Remastered": the left side is not the artist, so
-        // the metadata artist must be trusted and the title left intact.
-        let q = build_query(
-            Some("Numb - Remastered".into()),
-            vec!["Linkin Park".into()],
-            None,
-            Some(187),
-        )
-        .unwrap();
-        assert_eq!(q.artist, "Linkin Park");
-        assert_eq!(q.title, "Numb - Remastered");
     }
 }
