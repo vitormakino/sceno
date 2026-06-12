@@ -6,6 +6,7 @@
 
 use serde::Deserialize;
 use std::path::PathBuf;
+use std::time::Duration;
 
 const BASE: &str = "https://lrclib.net";
 const USER_AGENT: &str = concat!(
@@ -13,6 +14,10 @@ const USER_AGENT: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     " (https://github.com/vitormakino/lyrics-on-screen)"
 );
+
+/// Extra attempts after the first on a transient failure (network error / 5xx).
+const HTTP_RETRIES: u32 = 2;
+const RETRY_BACKOFF: Duration = Duration::from_millis(400);
 
 /// Identifying signature for a track, derived from player metadata.
 #[derive(Debug, Clone, PartialEq)]
@@ -81,33 +86,46 @@ fn network_fetch(q: &TrackQuery) -> Option<String> {
 }
 
 fn api_get(q: &TrackQuery) -> Option<LrclibTrack> {
-    let mut req = ureq::get(&format!("{BASE}/api/get"))
-        .set("User-Agent", USER_AGENT)
-        .query("artist_name", &q.artist)
-        .query("track_name", &q.title);
-    if let Some(album) = &q.album {
-        req = req.query("album_name", album);
-    }
-    if let Some(d) = q.duration {
-        req = req.query("duration", &d.to_string());
-    }
-    // `.call()` returns Err on non-2xx (e.g. 404 not found) → None.
-    let body = req.call().ok()?.into_string().ok()?;
+    let body = call_with_retry(|| {
+        let mut req = ureq::get(&format!("{BASE}/api/get"))
+            .set("User-Agent", USER_AGENT)
+            .query("artist_name", &q.artist)
+            .query("track_name", &q.title);
+        if let Some(album) = &q.album {
+            req = req.query("album_name", album);
+        }
+        if let Some(d) = q.duration {
+            req = req.query("duration", &d.to_string());
+        }
+        req
+    })?;
     serde_json::from_str(&body).ok()
 }
 
 fn api_search(q: &TrackQuery) -> Vec<LrclibTrack> {
-    let req = ureq::get(&format!("{BASE}/api/search"))
-        .set("User-Agent", USER_AGENT)
-        .query("track_name", &q.title)
-        .query("artist_name", &q.artist);
-    let Some(resp) = req.call().ok() else {
-        return Vec::new();
-    };
-    resp.into_string()
-        .ok()
-        .and_then(|b| serde_json::from_str(&b).ok())
-        .unwrap_or_default()
+    call_with_retry(|| {
+        ureq::get(&format!("{BASE}/api/search"))
+            .set("User-Agent", USER_AGENT)
+            .query("track_name", &q.title)
+            .query("artist_name", &q.artist)
+    })
+    .and_then(|b| serde_json::from_str(&b).ok())
+    .unwrap_or_default()
+}
+
+/// Issue a request, retrying transient failures (network errors, 5xx) with a
+/// short backoff. A `404` is a definitive miss and returns immediately. The
+/// request is rebuilt per attempt since `ureq::Request` is single-use.
+fn call_with_retry(build: impl Fn() -> ureq::Request) -> Option<String> {
+    for attempt in 0..=HTTP_RETRIES {
+        match build().call() {
+            Ok(resp) => return resp.into_string().ok(),
+            Err(ureq::Error::Status(404, _)) => return None,
+            Err(_) if attempt < HTTP_RETRIES => std::thread::sleep(RETRY_BACKOFF),
+            Err(_) => return None,
+        }
+    }
+    None
 }
 
 /// Among candidates with usable synced lyrics, pick the one whose duration is

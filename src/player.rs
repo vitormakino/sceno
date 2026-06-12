@@ -14,32 +14,36 @@ use std::time::{Duration, Instant};
 const POLL_INTERVAL: Duration = Duration::from_millis(1000);
 /// Backoff when no player is present.
 const IDLE_INTERVAL: Duration = Duration::from_secs(2);
+/// Times to re-attempt a lyrics fetch (one per poll) when a track first comes
+/// back empty — covers transient LRCLIB outages that outlast the HTTP retries.
+const FETCH_RETRIES: u32 = 3;
 
-/// Build a lyrics query from raw MPRIS metadata fields. When the player exposes
-/// no artist (common for browser tabs), fall back to splitting an
-/// "Artist - Title" style title. Returns `None` if there's no usable title.
+/// Noise words that mark a bracketed segment of a title as decoration.
+const NOISE_WORDS: &[&str] = &[
+    "official", "video", "audio", "lyric", "visualizer", "remaster", "explicit",
+    "hd", "4k", "mv", "clip", "color", "colour", "performance", "version",
+];
+
+/// Build a lyrics query from raw MPRIS metadata fields, cleaning the YouTube/VEVO
+/// decorations that otherwise wreck LRCLIB lookups: channel-name artists
+/// (`TimbalandVEVO`, `… - Topic`), bracketed tags (`[OFFICIAL VIDEO]`),
+/// featuring suffixes (`ft. …`), and an `Artist - ` title prefix. When the
+/// player exposes no artist, an `Artist - Title` shape is split. Returns `None`
+/// if there's no usable title.
 pub fn build_query(
     title: Option<String>,
     artists: Vec<String>,
     album: Option<String>,
     length_secs: Option<u64>,
 ) -> Option<TrackQuery> {
-    let title = title.map(|t| t.trim().to_string()).filter(|t| !t.is_empty())?;
+    let raw_title = title.map(|t| t.trim().to_string()).filter(|t| !t.is_empty())?;
 
-    let artist = artists
+    let meta_artist = artists
         .into_iter()
-        .map(|a| a.trim().to_string())
+        .map(|a| clean_artist(&a))
         .find(|a| !a.is_empty());
 
-    let (artist, title) = match artist {
-        Some(a) => (a, title),
-        None => match title.split_once(" - ") {
-            Some((a, t)) if !a.trim().is_empty() && !t.trim().is_empty() => {
-                (a.trim().to_string(), t.trim().to_string())
-            }
-            _ => (String::new(), title),
-        },
-    };
+    let (artist, title) = split_artist_title(clean_title(&raw_title), meta_artist);
 
     Some(TrackQuery {
         artist,
@@ -49,11 +53,131 @@ pub fn build_query(
     })
 }
 
+/// Resolve artist/title from a cleaned title and an optional metadata artist.
+///
+/// YouTube titles are usually `Artist - Song`, and the channel-name artist
+/// (`systemofadownVEVO`) is unreliable. So when the title's left side matches
+/// the metadata artist ignoring case/spacing/punctuation, we adopt the title's
+/// well-formatted name. With no metadata artist we assume `Artist - Song`.
+/// Otherwise we trust the metadata artist and leave the title untouched — safe
+/// for Spotify titles like `Numb - Remastered` that are not `Artist - Song`.
+fn split_artist_title(title: String, meta_artist: Option<String>) -> (String, String) {
+    if let Some((left, right)) = title.split_once(" - ") {
+        let (left, right) = (left.trim(), right.trim());
+        if !left.is_empty() && !right.is_empty() {
+            let take_title_split = match &meta_artist {
+                Some(a) => normalize(a) == normalize(left),
+                None => true,
+            };
+            if take_title_split {
+                return (left.to_string(), right.to_string());
+            }
+        }
+    }
+    (meta_artist.unwrap_or_default(), title)
+}
+
+/// Lowercased alphanumeric-only form, for comparing artist names that differ
+/// only in spacing/casing/punctuation (`systemofadown` vs `System Of A Down`).
+fn normalize(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// Strip channel-name cruft from an artist: a `VEVO` suffix or a ` - Topic`
+/// suffix (YouTube auto-generated artist channels).
+fn clean_artist(s: &str) -> String {
+    let mut a = s.trim().to_string();
+    if a.to_lowercase().ends_with(" - topic") {
+        a.truncate(a.len() - " - topic".len());
+        a = a.trim().to_string();
+    }
+    if a.len() >= 4 && a[a.len() - 4..].eq_ignore_ascii_case("vevo") {
+        a.truncate(a.len() - 4);
+        a = a.trim_end().to_string();
+    }
+    a
+}
+
+/// Remove YouTube decorations from a title: all `[…]` tags, `(…)` groups that
+/// contain a noise word, and any `feat./ft.` suffix.
+fn clean_title(s: &str) -> String {
+    let no_square = remove_groups(s, '[', ']', |_| false);
+    let no_paren = remove_groups(&no_square, '(', ')', |inner| !contains_noise(inner));
+    let no_feat = strip_featuring(&no_paren);
+    no_feat
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim_matches(|c: char| c == '-' || c.is_whitespace())
+        .to_string()
+}
+
+fn contains_noise(inner: &str) -> bool {
+    let lower = inner.to_lowercase();
+    NOISE_WORDS.iter().any(|w| lower.contains(w))
+}
+
+/// Remove `open…close` groups, keeping a group only when `keep_if(inner)` holds.
+fn remove_groups(s: &str, open: char, close: char, keep_if: impl Fn(&str) -> bool) -> String {
+    let mut out = String::new();
+    let mut buf = String::new();
+    let mut depth = 0u32;
+    for c in s.chars() {
+        if c == open {
+            depth += 1;
+        } else if c == close && depth > 0 {
+            depth -= 1;
+            if depth == 0 {
+                if keep_if(&buf) {
+                    out.push(open);
+                    out.push_str(&buf);
+                    out.push(close);
+                }
+                buf.clear();
+            }
+        } else if depth > 0 {
+            buf.push(c);
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Truncate a title at the first `feat./ft./featuring` marker.
+fn strip_featuring(s: &str) -> String {
+    let markers = [" feat.", " feat ", " ft.", " ft ", " featuring "];
+    match markers.iter().filter_map(|m| find_ci(s, m)).min() {
+        Some(i) => s[..i].to_string(),
+        None => s.to_string(),
+    }
+}
+
+/// ASCII-case-insensitive substring search returning a byte index into `haystack`.
+fn find_ci(haystack: &str, needle: &str) -> Option<usize> {
+    let (h, n) = (haystack.as_bytes(), needle.as_bytes());
+    if n.is_empty() || h.len() < n.len() {
+        return None;
+    }
+    (0..=h.len() - n.len()).find(|&i| h[i..i + n.len()].eq_ignore_ascii_case(n))
+}
+
+/// Lightweight stderr tracing, enabled with `LOS_DEBUG=1`.
+fn debug(args: std::fmt::Arguments) {
+    if std::env::var_os("LOS_DEBUG").is_some() {
+        eprintln!("[player] {args}");
+    }
+}
+
 /// Run the MPRIS polling loop forever (intended to own a dedicated thread).
 pub fn run(tx: UnboundedSender<Message>) {
     loop {
-        if let Ok(finder) = PlayerFinder::new() {
-            track_active_player(&finder, &tx);
+        match PlayerFinder::new() {
+            Ok(finder) => track_active_player(&finder, &tx),
+            Err(e) => debug(format_args!("no D-Bus / PlayerFinder error: {e}")),
         }
         // Either no D-Bus or the player vanished — back off and retry.
         std::thread::sleep(IDLE_INTERVAL);
@@ -64,10 +188,20 @@ pub fn run(tx: UnboundedSender<Message>) {
 /// caller can re-discover.
 fn track_active_player(finder: &PlayerFinder, tx: &UnboundedSender<Message>) {
     let mut current_key: Option<String> = None;
+    let mut retries_left: u32 = 0;
 
     loop {
-        let Ok(player) = finder.find_active() else { return };
-        let Ok(metadata) = player.get_metadata() else { return };
+        let player = match finder.find_active() {
+            Ok(p) => p,
+            Err(e) => {
+                debug(format_args!("no active player: {e}"));
+                return;
+            }
+        };
+        let Ok(metadata) = player.get_metadata() else {
+            debug(format_args!("metadata read failed for '{}'", player.identity()));
+            return;
+        };
 
         let query = build_query(
             metadata.title().map(str::to_string),
@@ -93,15 +227,33 @@ fn track_active_player(finder: &PlayerFinder, tx: &UnboundedSender<Message>) {
         };
 
         let key = query.as_ref().map(TrackQuery::key);
-        let send_result = if key != current_key {
+        let track_changed = key != current_key;
+        if track_changed {
             current_key = key;
-            // Track changed (or first sight) — fetch lyrics and reset the timeline.
-            let cues = query
-                .as_ref()
-                .and_then(lrclib::fetch_synced)
-                .map(|s| lrc::parse_lrc(&s))
-                .unwrap_or_default();
-            tx.unbounded_send(Message::CuesReceived(cues, sync))
+            retries_left = FETCH_RETRIES;
+        }
+
+        // Fetch on a new track, or while retrying one that came back empty.
+        let send_result = if track_changed || retries_left > 0 {
+            let cues = fetch_cues(&query);
+            if !cues.is_empty() {
+                retries_left = 0;
+                debug(format_args!(
+                    "player='{}' query={:?} -> {} cues",
+                    player.identity(),
+                    query,
+                    cues.len()
+                ));
+                tx.unbounded_send(Message::CuesReceived(cues, sync))
+            } else if track_changed {
+                // First miss — keep the empty timeline but schedule retries.
+                debug(format_args!("query={:?} -> no lyrics (will retry)", query));
+                tx.unbounded_send(Message::CuesReceived(cues, sync))
+            } else {
+                retries_left -= 1;
+                debug(format_args!("retry: still no lyrics ({retries_left} left)"));
+                tx.unbounded_send(Message::SyncReceived(sync))
+            }
         } else {
             tx.unbounded_send(Message::SyncReceived(sync))
         };
@@ -112,6 +264,15 @@ fn track_active_player(finder: &PlayerFinder, tx: &UnboundedSender<Message>) {
 
         std::thread::sleep(POLL_INTERVAL);
     }
+}
+
+/// Fetch and parse synced lyrics for a query, or an empty list on miss/failure.
+fn fetch_cues(query: &Option<TrackQuery>) -> Vec<crate::CueEntry> {
+    query
+        .as_ref()
+        .and_then(lrclib::fetch_synced)
+        .map(|s| lrc::parse_lrc(&s))
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -166,5 +327,94 @@ mod tests {
         let q = build_query(Some("S".into()), vec!["A".into()], Some("".into()), Some(0)).unwrap();
         assert_eq!(q.album, None);
         assert_eq!(q.duration, None);
+    }
+
+    // ── metadata cleaning ─────────────────────────────────────────────────────
+
+    #[test]
+    fn clean_artist_strips_vevo_and_topic() {
+        assert_eq!(clean_artist("TimbalandVEVO"), "Timbaland");
+        assert_eq!(clean_artist("EminemVEVO"), "Eminem");
+        assert_eq!(clean_artist("OneRepublic - Topic"), "OneRepublic");
+        assert_eq!(clean_artist("Slipknot"), "Slipknot");
+    }
+
+    #[test]
+    fn clean_title_removes_brackets_and_featuring() {
+        assert_eq!(
+            clean_title("Slipknot - Vermilion Pt. 2 [OFFICIAL VIDEO] [HD]"),
+            "Slipknot - Vermilion Pt. 2"
+        );
+        assert_eq!(clean_title("Apologize ft. OneRepublic"), "Apologize");
+        assert_eq!(clean_title("Song (Official Audio)"), "Song");
+    }
+
+    #[test]
+    fn clean_title_keeps_meaningful_parentheses() {
+        // a parenthetical without noise words is part of the real title
+        assert_eq!(clean_title("Hurt (Acoustic)"), "Hurt (Acoustic)");
+    }
+
+    #[test]
+    fn build_query_cleans_youtube_vevo_metadata() {
+        // The exact shape observed live from a Chromium YouTube tab.
+        let q = build_query(
+            Some("Timbaland - Apologize ft. OneRepublic".into()),
+            vec!["TimbalandVEVO".into()],
+            None,
+            Some(188),
+        )
+        .unwrap();
+        assert_eq!(q.artist, "Timbaland");
+        assert_eq!(q.title, "Apologize");
+    }
+
+    #[test]
+    fn build_query_strips_artist_prefix_from_title() {
+        let q = build_query(
+            Some("Slipknot - Vermilion Pt. 2 [OFFICIAL VIDEO] [HD]".into()),
+            vec!["Slipknot".into()],
+            None,
+            Some(232),
+        )
+        .unwrap();
+        assert_eq!(q.artist, "Slipknot");
+        assert_eq!(q.title, "Vermilion Pt. 2");
+    }
+
+    #[test]
+    fn build_query_matches_concatenated_vevo_channel_to_title() {
+        // Channel artist is concatenated/lowercased and only matches the title's
+        // left side after normalization.
+        let q = build_query(
+            Some("System Of A Down - Lonely Day (Official HD Video)".into()),
+            vec!["systemofadownVEVO".into()],
+            None,
+            Some(165),
+        )
+        .unwrap();
+        assert_eq!(q.artist, "System Of A Down");
+        assert_eq!(q.title, "Lonely Day");
+    }
+
+    #[test]
+    fn fetch_cues_empty_for_missing_query() {
+        // A `None` query short-circuits before any network access.
+        assert!(fetch_cues(&None).is_empty());
+    }
+
+    #[test]
+    fn build_query_does_not_split_non_artist_dash_titles() {
+        // Spotify-style "Song - Remastered": the left side is not the artist, so
+        // the metadata artist must be trusted and the title left intact.
+        let q = build_query(
+            Some("Numb - Remastered".into()),
+            vec!["Linkin Park".into()],
+            None,
+            Some(187),
+        )
+        .unwrap();
+        assert_eq!(q.artist, "Linkin Park");
+        assert_eq!(q.title, "Numb - Remastered");
     }
 }
