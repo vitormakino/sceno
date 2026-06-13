@@ -11,16 +11,16 @@ use iced_layershell::reexport::{Anchor, KeyboardInteractivity, Layer};
 use iced_layershell::settings::LayerShellSettings;
 use std::os::unix::io::AsRawFd;
 
-const LOCK_PATH: &str = "/tmp/lyrics-on-screen.lock";
-
-/// Exits the process with an informative message if another instance is
-/// already running (uses `flock(2)` on a well-known path).
-pub fn ensure_single_instance() {
+/// Exits the process if another instance of `app` is already running.
+/// Uses a per-app `flock(2)` lock under `$XDG_RUNTIME_DIR` (fallback `/tmp`).
+pub fn ensure_single_instance(app: &str) {
+    let dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
+    let path = std::path::Path::new(&dir).join(format!("{app}.lock"));
     let file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(false)
-        .open(LOCK_PATH)
+        .open(&path)
         .unwrap_or_else(|e| {
             eprintln!("[overlay] não foi possível abrir lock file: {e}");
             std::process::exit(1);
@@ -28,7 +28,7 @@ pub fn ensure_single_instance() {
     // LOCK_EX | LOCK_NB — exclusive, non-blocking
     let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
     if ret != 0 {
-        eprintln!("[overlay] já está em execução");
+        eprintln!("[overlay] {app} já está em execução");
         std::process::exit(0);
     }
     // Keep fd open for the process lifetime; kernel releases the lock on exit.
@@ -67,7 +67,7 @@ pub trait OverlayApp: Default + Sized + 'static {
 /// application with a transparent background, white text, bottom-anchored
 /// 80px panel.
 pub fn run<A: OverlayApp>() -> iced_layershell::Result {
-    ensure_single_instance();
+    ensure_single_instance(A::namespace());
 
     iced_layershell::application(A::default, A::namespace(), update_wrapper::<A>, view_wrapper::<A>)
         .subscription(|state: &A| state.subscription())
