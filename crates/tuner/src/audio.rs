@@ -5,7 +5,6 @@ use pitch_detection::detector::PitchDetector;
 
 /// Estimate the fundamental frequency of a mono f32 buffer, or `None` if no
 /// clear pitch. `sample_rate` in Hz; `min_clarity` in 0..1.
-#[cfg_attr(not(feature = "capture"), allow(dead_code))]
 pub fn detect_frequency(samples: &[f32], sample_rate: u32, min_clarity: f64) -> Option<f64> {
     let size = samples.len();
     if size < 256 {
@@ -19,17 +18,10 @@ pub fn detect_frequency(samples: &[f32], sample_rate: u32, min_clarity: f64) -> 
         .map(|p| p.frequency)
 }
 
-// ── Capture runner (requires `capture` feature + ALSA dev headers on Linux) ──
+// ── Capture runner ────────────────────────────────────────────────────────────
 
-#[cfg(feature = "capture")]
 pub use capture_impl::run;
 
-#[cfg(not(feature = "capture"))]
-pub fn run(_tx: futures::channel::mpsc::UnboundedSender<crate::Message>) {
-    eprintln!("[tuner] built without `capture` feature; mic input disabled");
-}
-
-#[cfg(feature = "capture")]
 mod capture_impl {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     use futures::channel::mpsc::UnboundedSender;
