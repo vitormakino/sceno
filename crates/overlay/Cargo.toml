@@ -1,7 +1,11 @@
 [package]
 name = "overlay"
+description = "Shared Wayland layer-shell overlay base for the sceno apps."
 version.workspace = true
 edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 iced.workspace = true

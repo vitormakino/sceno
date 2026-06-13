@@ -5,6 +5,12 @@ members = ["crates/*"]
 [workspace.package]
 edition = "2024"
 version = "0.1.0"
+authors = ["Vitor Makino <vitor.makino@gmail.com>"]
+license = "MIT"
+repository = "https://github.com/vitormakino/sceno"
+readme = "README.md"
+keywords = ["wayland", "overlay", "layer-shell", "lyrics", "tuner"]
+categories = ["gui", "multimedia"]
 
 [workspace.dependencies]
 iced = "0.14"
