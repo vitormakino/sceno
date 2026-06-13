@@ -1,6 +1,8 @@
 //! Reusable Wayland layer-shell overlay shell shared by the overlay apps.
 
+mod paths;
 mod settings;
+pub use paths::{cache_dir, config_dir};
 pub use settings::{load_config, save, FontSize, Position, SavedConfig};
 
 use iced::Element;

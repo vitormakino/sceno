@@ -10,9 +10,9 @@ use std::time::Duration;
 
 const BASE: &str = "https://lrclib.net";
 const USER_AGENT: &str = concat!(
-    "lyrics-on-screen v",
+    "sceno-lyrics v",
     env!("CARGO_PKG_VERSION"),
-    " (https://github.com/vitormakino/lyrics-on-screen)"
+    " (https://github.com/vitormakino/sceno)"
 );
 
 /// Extra attempts after the first on a transient failure (network error / 5xx).
@@ -155,9 +155,7 @@ fn best_match(tracks: Vec<LrclibTrack>, target: Option<u64>) -> Option<LrclibTra
 // ── On-disk cache ───────────────────────────────────────────────────────────
 
 fn cache_dir() -> Option<PathBuf> {
-    std::env::var("HOME")
-        .ok()
-        .map(|h| PathBuf::from(h).join(".cache/lyrics-on-screen"))
+    overlay::cache_dir("lyrics")
 }
 
 fn cache_file(q: &TrackQuery) -> Option<PathBuf> {
