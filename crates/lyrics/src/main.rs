@@ -267,10 +267,8 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
                 apply_timeline_caption(state);
             }
         }
-        Message::TimelineTick => {
-            if state.enabled {
-                apply_timeline_caption(state);
-            }
+        Message::TimelineTick if state.enabled => {
+            apply_timeline_caption(state);
         }
         _ => {}
     }
