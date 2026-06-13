@@ -66,12 +66,12 @@ fn resolve_artist_title(
     meta_artist: Option<String>,
     from_browser: bool,
 ) -> (String, String) {
-    if from_browser || meta_artist.is_none() {
-        if let Some((left, right)) = title.split_once(" - ") {
-            let (left, right) = (left.trim(), right.trim());
-            if !left.is_empty() && !right.is_empty() {
-                return (left.to_string(), right.to_string());
-            }
+    if (from_browser || meta_artist.is_none())
+        && let Some((left, right)) = title.split_once(" - ")
+    {
+        let (left, right) = (left.trim(), right.trim());
+        if !left.is_empty() && !right.is_empty() {
+            return (left.to_string(), right.to_string());
         }
     }
     (meta_artist.unwrap_or_default(), title)
