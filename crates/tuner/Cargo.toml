@@ -1,7 +1,11 @@
 [package]
 name = "tuner"
+description = "Vocal tuner overlay: microphone pitch detection to note + tuning meter."
 version.workspace = true
 edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 overlay = { path = "../overlay" }

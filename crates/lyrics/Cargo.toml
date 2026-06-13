@@ -1,7 +1,11 @@
 [package]
 name = "lyrics"
+description = "Synced lyrics overlay driven by MPRIS + LRCLIB."
 version.workspace = true
 edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 overlay = { path = "../overlay" }

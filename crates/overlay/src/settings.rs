@@ -82,34 +82,38 @@ pub fn default_enabled() -> bool {
 
 impl Default for SavedConfig {
     fn default() -> Self {
-        SavedConfig { font_size_idx: 1, enabled: true }
+        SavedConfig {
+            font_size_idx: 1,
+            enabled: true,
+        }
     }
 }
 
 // ── Config I/O ────────────────────────────────────────────────────────────────
 
-pub fn config_path() -> Option<std::path::PathBuf> {
-    std::env::var("HOME").ok().map(|home| {
-        std::path::PathBuf::from(home).join(".config/lyrics-on-screen/config.json")
-    })
+pub fn config_path(app: &str) -> Option<std::path::PathBuf> {
+    crate::paths::config_dir(app).map(|d| d.join("config.json"))
 }
 
-pub fn load_config() -> SavedConfig {
-    config_path()
+pub fn load_config(app: &str) -> SavedConfig {
+    config_path(app)
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default()
 }
 
-pub fn save(font_size: FontSize, enabled: bool) {
+pub fn save(app: &str, font_size: FontSize, enabled: bool) {
     if cfg!(test) {
         return;
     }
-    let Some(path) = config_path() else { return };
+    let Some(path) = config_path(app) else { return };
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let cfg = SavedConfig { font_size_idx: font_size.index(), enabled };
+    let cfg = SavedConfig {
+        font_size_idx: font_size.index(),
+        enabled,
+    };
     if let Ok(json) = serde_json::to_string(&cfg) {
         let _ = std::fs::write(path, json);
     }
@@ -123,7 +127,11 @@ mod tests {
 
     #[test]
     fn fontsize_from_idx_roundtrips() {
-        for (i, expected) in [(0, FontSize::Small), (1, FontSize::Medium), (2, FontSize::Large)] {
+        for (i, expected) in [
+            (0, FontSize::Small),
+            (1, FontSize::Medium),
+            (2, FontSize::Large),
+        ] {
             assert_eq!(FontSize::from_idx(i), expected);
             assert_eq!(expected.index(), i);
         }
@@ -136,7 +144,10 @@ mod tests {
 
     #[test]
     fn saved_config_roundtrips_json() {
-        let cfg = SavedConfig { font_size_idx: 2, enabled: false };
+        let cfg = SavedConfig {
+            font_size_idx: 2,
+            enabled: false,
+        };
         let json = serde_json::to_string(&cfg).unwrap();
         let loaded: SavedConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(loaded.font_size_idx, 2);

@@ -4,7 +4,7 @@
 //! synced lyrics from LRCLIB on track changes, and feeds the existing timeline
 //! machinery via `Message::CuesReceived` / `Message::SyncReceived`.
 
-use crate::{lrc, lrclib, Message, TimelineSync};
+use crate::{Message, TimelineSync, lrc, lrclib};
 use futures::channel::mpsc::UnboundedSender;
 use lrclib::TrackQuery;
 use mpris::{PlaybackStatus, PlayerFinder};
@@ -20,8 +20,21 @@ const FETCH_RETRIES: u32 = 3;
 
 /// Noise words that mark a bracketed segment of a title as decoration.
 const NOISE_WORDS: &[&str] = &[
-    "official", "video", "audio", "lyric", "visualizer", "remaster", "explicit",
-    "hd", "4k", "mv", "clip", "color", "colour", "performance", "version",
+    "official",
+    "video",
+    "audio",
+    "lyric",
+    "visualizer",
+    "remaster",
+    "explicit",
+    "hd",
+    "4k",
+    "mv",
+    "clip",
+    "color",
+    "colour",
+    "performance",
+    "version",
 ];
 
 /// Build a lyrics query from raw MPRIS metadata fields, cleaning the decorations
@@ -41,7 +54,9 @@ pub fn build_query(
     length_secs: Option<u64>,
     from_browser: bool,
 ) -> Option<TrackQuery> {
-    let raw_title = title.map(|t| t.trim().to_string()).filter(|t| !t.is_empty())?;
+    let raw_title = title
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())?;
 
     let meta_artist = artists
         .into_iter()
@@ -53,7 +68,9 @@ pub fn build_query(
     Some(TrackQuery {
         artist,
         title,
-        album: album.map(|a| a.trim().to_string()).filter(|a| !a.is_empty()),
+        album: album
+            .map(|a| a.trim().to_string())
+            .filter(|a| !a.is_empty()),
         duration: length_secs.filter(|&d| d > 0),
     })
 }
@@ -66,12 +83,12 @@ fn resolve_artist_title(
     meta_artist: Option<String>,
     from_browser: bool,
 ) -> (String, String) {
-    if from_browser || meta_artist.is_none() {
-        if let Some((left, right)) = title.split_once(" - ") {
-            let (left, right) = (left.trim(), right.trim());
-            if !left.is_empty() && !right.is_empty() {
-                return (left.to_string(), right.to_string());
-            }
+    if (from_browser || meta_artist.is_none())
+        && let Some((left, right)) = title.split_once(" - ")
+    {
+        let (left, right) = (left.trim(), right.trim());
+        if !left.is_empty() && !right.is_empty() {
+            return (left.to_string(), right.to_string());
         }
     }
     (meta_artist.unwrap_or_default(), title)
@@ -115,9 +132,11 @@ fn contains_noise(inner: &str) -> bool {
 /// the channel/label, not the performer).
 fn is_browser(identity: &str) -> bool {
     let id = identity.to_lowercase();
-    ["chrome", "chromium", "firefox", "mozilla", "brave", "edge", "vivaldi", "opera"]
-        .iter()
-        .any(|b| id.contains(b))
+    [
+        "chrome", "chromium", "firefox", "mozilla", "brave", "edge", "vivaldi", "opera",
+    ]
+    .iter()
+    .any(|b| id.contains(b))
 }
 
 /// Remove `open…close` groups, keeping a group only when `keep_if(inner)` holds.
@@ -165,9 +184,9 @@ fn find_ci(haystack: &str, needle: &str) -> Option<usize> {
     (0..=h.len() - n.len()).find(|&i| h[i..i + n.len()].eq_ignore_ascii_case(n))
 }
 
-/// Lightweight stderr tracing, enabled with `LOS_DEBUG=1`.
+/// Lightweight stderr tracing, enabled with `SCENO_DEBUG=1`.
 fn debug(args: std::fmt::Arguments) {
-    if std::env::var_os("LOS_DEBUG").is_some() {
+    if std::env::var_os("SCENO_DEBUG").is_some() {
         eprintln!("[player] {args}");
     }
 }
@@ -199,7 +218,10 @@ fn track_active_player(finder: &PlayerFinder, tx: &UnboundedSender<Message>) {
             }
         };
         let Ok(metadata) = player.get_metadata() else {
-            debug(format_args!("metadata read failed for '{}'", player.identity()));
+            debug(format_args!(
+                "metadata read failed for '{}'",
+                player.identity()
+            ));
             return;
         };
 
@@ -215,10 +237,15 @@ fn track_active_player(finder: &PlayerFinder, tx: &UnboundedSender<Message>) {
         );
 
         let paused = !matches!(
-            player.get_playback_status().unwrap_or(PlaybackStatus::Stopped),
+            player
+                .get_playback_status()
+                .unwrap_or(PlaybackStatus::Stopped),
             PlaybackStatus::Playing
         );
-        let position = player.get_position().unwrap_or(Duration::ZERO).as_secs_f64();
+        let position = player
+            .get_position()
+            .unwrap_or(Duration::ZERO)
+            .as_secs_f64();
         let rate = player.get_playback_rate().unwrap_or(1.0);
         let sync = TimelineSync {
             video_time: position,
@@ -299,7 +326,14 @@ mod tests {
 
     #[test]
     fn build_query_splits_artist_from_title_when_missing() {
-        let q = build_query(Some("Daft Punk - Get Lucky".into()), vec![], None, None, false).unwrap();
+        let q = build_query(
+            Some("Daft Punk - Get Lucky".into()),
+            vec![],
+            None,
+            None,
+            false,
+        )
+        .unwrap();
         assert_eq!(q.artist, "Daft Punk");
         assert_eq!(q.title, "Get Lucky");
     }
@@ -327,7 +361,14 @@ mod tests {
 
     #[test]
     fn build_query_drops_zero_duration_and_empty_album() {
-        let q = build_query(Some("S".into()), vec!["A".into()], Some("".into()), Some(0), false).unwrap();
+        let q = build_query(
+            Some("S".into()),
+            vec!["A".into()],
+            Some("".into()),
+            Some(0),
+            false,
+        )
+        .unwrap();
         assert_eq!(q.album, None);
         assert_eq!(q.duration, None);
     }

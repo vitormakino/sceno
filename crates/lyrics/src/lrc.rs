@@ -23,7 +23,9 @@ pub fn parse_lrc(input: &str) -> Vec<CueEntry> {
         // Consume leading `[..]` tags. Timestamps are collected; the first
         // non-timestamp tag ends the prefix (metadata-only lines yield none).
         while let Some(stripped) = rest.strip_prefix('[') {
-            let Some(close) = stripped.find(']') else { break };
+            let Some(close) = stripped.find(']') else {
+                break;
+            };
             match parse_time(&stripped[..close]) {
                 Some(t) => {
                     times.push(t);
@@ -50,7 +52,11 @@ pub fn parse_lrc(input: &str) -> Vec<CueEntry> {
         .enumerate()
         .map(|(i, (start, text))| {
             let end = entries.get(i + 1).map_or(start + LAST_CUE_SECS, |n| n.0);
-            CueEntry { start: *start, end, text: text.clone() }
+            CueEntry {
+                start: *start,
+                end,
+                text: text.clone(),
+            }
         })
         .collect()
 }

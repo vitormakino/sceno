@@ -21,7 +21,9 @@ struct State {
 
 impl overlay::OverlayApp for State {
     type Message = Message;
-    fn namespace() -> &'static str { "tuner" }
+    fn namespace() -> &'static str {
+        "tuner"
+    }
     fn update(&mut self, message: Message) -> Task<Message> {
         if let Message::PitchUpdate(n) = message {
             self.note = n;
@@ -34,9 +36,15 @@ impl overlay::OverlayApp for State {
             Some(n) => {
                 let in_tune = note::is_in_tune(n.cents);
                 let pos = note::meter_position(n.cents) as f32;
-                let color = if in_tune { Color::from_rgb(0.3, 0.9, 0.3) } else { Color::WHITE };
+                let color = if in_tune {
+                    Color::from_rgb(0.3, 0.9, 0.3)
+                } else {
+                    Color::WHITE
+                };
                 column![
-                    text(format!("{}{}", n.name, n.octave)).size(44.0).color(color),
+                    text(format!("{}{}", n.name, n.octave))
+                        .size(44.0)
+                        .color(color),
                     progress_bar(0.0..=1.0, pos).girth(8.0),
                     text(format!("{:+.0}¢", n.cents)).size(20.0).color(color),
                 ]
@@ -45,7 +53,10 @@ impl overlay::OverlayApp for State {
                 .into()
             }
         };
-        container(content).center_x(iced::Fill).center_y(iced::Fill).into()
+        container(content)
+            .center_x(iced::Fill)
+            .center_y(iced::Fill)
+            .into()
     }
     fn subscription(&self) -> Subscription<Message> {
         Subscription::run(audio_stream)

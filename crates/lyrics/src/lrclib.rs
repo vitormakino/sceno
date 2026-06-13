@@ -10,9 +10,9 @@ use std::time::Duration;
 
 const BASE: &str = "https://lrclib.net";
 const USER_AGENT: &str = concat!(
-    "lyrics-on-screen v",
+    "sceno-lyrics v",
     env!("CARGO_PKG_VERSION"),
-    " (https://github.com/vitormakino/lyrics-on-screen)"
+    " (https://github.com/vitormakino/sceno)"
 );
 
 /// Extra attempts after the first on a transient failure (network error / 5xx).
@@ -113,15 +113,29 @@ fn api_search(q: &TrackQuery) -> Vec<LrclibTrack> {
     .unwrap_or_default()
 }
 
-/// Issue a request, retrying transient failures (network errors, 5xx) with a
-/// short backoff. A `404` is a definitive miss and returns immediately. The
-/// request is rebuilt per attempt since `ureq::Request` is single-use.
+/// Whether an HTTP status code warrants a retry. Only server-side `5xx`
+/// errors are transient; `4xx` (including `404`/`429`) are definitive.
+fn status_is_retryable(code: u16) -> bool {
+    (500..600).contains(&code)
+}
+
+/// Issue a request, retrying only transient failures (transport/network errors
+/// and `5xx`) with a short backoff. Any `4xx` is a definitive result and
+/// returns immediately. The request is rebuilt per attempt since
+/// `ureq::Request` is single-use.
 fn call_with_retry(build: impl Fn() -> ureq::Request) -> Option<String> {
     for attempt in 0..=HTTP_RETRIES {
         match build().call() {
             Ok(resp) => return resp.into_string().ok(),
-            Err(ureq::Error::Status(404, _)) => return None,
-            Err(_) if attempt < HTTP_RETRIES => std::thread::sleep(RETRY_BACKOFF),
+            Err(ureq::Error::Status(code, _))
+                if status_is_retryable(code) && attempt < HTTP_RETRIES =>
+            {
+                std::thread::sleep(RETRY_BACKOFF);
+            }
+            Err(ureq::Error::Transport(_)) if attempt < HTTP_RETRIES => {
+                std::thread::sleep(RETRY_BACKOFF);
+            }
+            // 4xx, a non-retryable status, or retries exhausted.
             Err(_) => return None,
         }
     }
@@ -133,7 +147,9 @@ fn call_with_retry(build: impl Fn() -> ureq::Request) -> Option<String> {
 fn best_match(tracks: Vec<LrclibTrack>, target: Option<u64>) -> Option<LrclibTrack> {
     let mut usable = tracks.into_iter().filter(|t| t.usable_synced().is_some());
     match target {
-        Some(d) => usable.min_by_key(|t| (t.duration.unwrap_or(0.0) - d as f64).abs().round() as i64),
+        Some(d) => {
+            usable.min_by_key(|t| (t.duration.unwrap_or(0.0) - d as f64).abs().round() as i64)
+        }
         None => usable.next(),
     }
 }
@@ -141,9 +157,7 @@ fn best_match(tracks: Vec<LrclibTrack>, target: Option<u64>) -> Option<LrclibTra
 // ── On-disk cache ───────────────────────────────────────────────────────────
 
 fn cache_dir() -> Option<PathBuf> {
-    std::env::var("HOME")
-        .ok()
-        .map(|h| PathBuf::from(h).join(".cache/lyrics-on-screen"))
+    overlay::cache_dir("lyrics")
 }
 
 fn cache_file(q: &TrackQuery) -> Option<PathBuf> {
@@ -188,8 +202,18 @@ mod tests {
 
     #[test]
     fn key_is_case_insensitive_and_stable() {
-        let a = TrackQuery { artist: "ABBA".into(), title: "SOS".into(), album: None, duration: Some(200) };
-        let b = TrackQuery { artist: "abba".into(), title: "sos".into(), album: None, duration: Some(200) };
+        let a = TrackQuery {
+            artist: "ABBA".into(),
+            title: "SOS".into(),
+            album: None,
+            duration: Some(200),
+        };
+        let b = TrackQuery {
+            artist: "abba".into(),
+            title: "sos".into(),
+            album: None,
+            duration: Some(200),
+        };
         assert_eq!(a.key(), b.key());
         assert_eq!(a.key(), "abba|sos||200");
     }
@@ -207,7 +231,10 @@ mod tests {
             "syncedLyrics": "[00:15.00]Now here you go again"
         }"#;
         let t: LrclibTrack = serde_json::from_str(json).unwrap();
-        assert_eq!(t.usable_synced().as_deref(), Some("[00:15.00]Now here you go again"));
+        assert_eq!(
+            t.usable_synced().as_deref(),
+            Some("[00:15.00]Now here you go again")
+        );
         assert!(!t.instrumental);
     }
 
@@ -228,9 +255,21 @@ mod tests {
     #[test]
     fn best_match_picks_closest_duration() {
         let tracks = vec![
-            LrclibTrack { duration: Some(300.0), synced_lyrics: Some("[00:01.00]a".into()), ..Default::default() },
-            LrclibTrack { duration: Some(258.0), synced_lyrics: Some("[00:01.00]b".into()), ..Default::default() },
-            LrclibTrack { duration: Some(200.0), synced_lyrics: Some("[00:01.00]c".into()), ..Default::default() },
+            LrclibTrack {
+                duration: Some(300.0),
+                synced_lyrics: Some("[00:01.00]a".into()),
+                ..Default::default()
+            },
+            LrclibTrack {
+                duration: Some(258.0),
+                synced_lyrics: Some("[00:01.00]b".into()),
+                ..Default::default()
+            },
+            LrclibTrack {
+                duration: Some(200.0),
+                synced_lyrics: Some("[00:01.00]c".into()),
+                ..Default::default()
+            },
         ];
         let picked = best_match(tracks, Some(257)).unwrap();
         assert_eq!(picked.synced_lyrics.as_deref(), Some("[00:01.00]b"));
@@ -239,8 +278,16 @@ mod tests {
     #[test]
     fn best_match_skips_candidates_without_synced() {
         let tracks = vec![
-            LrclibTrack { duration: Some(257.0), synced_lyrics: None, ..Default::default() },
-            LrclibTrack { duration: Some(400.0), synced_lyrics: Some("[00:01.00]only".into()), ..Default::default() },
+            LrclibTrack {
+                duration: Some(257.0),
+                synced_lyrics: None,
+                ..Default::default()
+            },
+            LrclibTrack {
+                duration: Some(400.0),
+                synced_lyrics: Some("[00:01.00]only".into()),
+                ..Default::default()
+            },
         ];
         let picked = best_match(tracks, Some(257)).unwrap();
         assert_eq!(picked.synced_lyrics.as_deref(), Some("[00:01.00]only"));
@@ -248,7 +295,11 @@ mod tests {
 
     #[test]
     fn best_match_none_when_no_synced() {
-        let tracks = vec![LrclibTrack { duration: Some(257.0), synced_lyrics: None, ..Default::default() }];
+        let tracks = vec![LrclibTrack {
+            duration: Some(257.0),
+            synced_lyrics: None,
+            ..Default::default()
+        }];
         assert!(best_match(tracks, Some(257)).is_none());
     }
 
@@ -256,5 +307,17 @@ mod tests {
     fn cache_disabled_in_tests() {
         // Guards against tests accidentally depending on a real cache dir.
         assert!(cache_read(&q()).is_none());
+    }
+
+    #[test]
+    fn only_5xx_status_is_retryable() {
+        // Client errors (4xx) are definitive — never retried.
+        assert!(!status_is_retryable(400));
+        assert!(!status_is_retryable(403));
+        assert!(!status_is_retryable(404));
+        assert!(!status_is_retryable(429));
+        // Server errors (5xx) are transient — retry.
+        assert!(status_is_retryable(500));
+        assert!(status_is_retryable(503));
     }
 }

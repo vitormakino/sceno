@@ -10,6 +10,10 @@ mod lrc;
 mod lrclib;
 mod player;
 
+/// App name: used for the Wayland namespace, the single-instance lock, and the
+/// config/cache directory (`~/.config/sceno/lyrics`, `~/.cache/sceno/lyrics`).
+const APP: &str = "lyrics";
+
 // ── Timeline types ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -68,7 +72,7 @@ struct State {
 
 impl Default for State {
     fn default() -> Self {
-        let cfg = overlay::load_config();
+        let cfg = overlay::load_config(APP);
         State {
             caption: String::new(),
             enabled: cfg.enabled,
@@ -103,7 +107,7 @@ impl ksni::Tray for LyricsTray {
         "audio-x-generic".into()
     }
     fn title(&self) -> String {
-        "Lyrics on Screen".into()
+        "sceno · lyrics".into()
     }
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
         use ksni::menu::*;
@@ -123,50 +127,67 @@ impl ksni::Tray for LyricsTray {
             MenuItem::Separator,
             SubMenu {
                 label: "Posição".into(),
-                submenu: vec![RadioGroup {
-                    selected: pos.index(),
-                    select: Box::new(|this: &mut Self, idx| {
-                        this.position = match idx {
-                            0 => Position::Bottom,
-                            _ => Position::Top,
-                        };
-                        let _ = this
-                            .tx
-                            .unbounded_send(Message::AnchorChange(this.position.anchor()));
-                        let _ = this
-                            .tx
-                            .unbounded_send(Message::MarginChange(this.position.margin()));
-                    }),
-                    options: vec![
-                        RadioItem { label: "Baixo".into(), ..Default::default() },
-                        RadioItem { label: "Topo".into(), ..Default::default() },
-                    ],
-                }
-                .into()],
+                submenu: vec![
+                    RadioGroup {
+                        selected: pos.index(),
+                        select: Box::new(|this: &mut Self, idx| {
+                            this.position = match idx {
+                                0 => Position::Bottom,
+                                _ => Position::Top,
+                            };
+                            let _ = this
+                                .tx
+                                .unbounded_send(Message::AnchorChange(this.position.anchor()));
+                            let _ = this
+                                .tx
+                                .unbounded_send(Message::MarginChange(this.position.margin()));
+                        }),
+                        options: vec![
+                            RadioItem {
+                                label: "Baixo".into(),
+                                ..Default::default()
+                            },
+                            RadioItem {
+                                label: "Topo".into(),
+                                ..Default::default()
+                            },
+                        ],
+                    }
+                    .into(),
+                ],
                 ..Default::default()
             }
             .into(),
             SubMenu {
                 label: "Tamanho da fonte".into(),
-                submenu: vec![RadioGroup {
-                    selected: fs.index(),
-                    select: Box::new(|this: &mut Self, idx| {
-                        this.font_size = match idx {
-                            0 => FontSize::Small,
-                            1 => FontSize::Medium,
-                            _ => FontSize::Large,
-                        };
-                        let _ = this
-                            .tx
-                            .unbounded_send(Message::SetFontSize(this.font_size));
-                    }),
-                    options: vec![
-                        RadioItem { label: "Pequeno".into(), ..Default::default() },
-                        RadioItem { label: "Médio".into(), ..Default::default() },
-                        RadioItem { label: "Grande".into(), ..Default::default() },
-                    ],
-                }
-                .into()],
+                submenu: vec![
+                    RadioGroup {
+                        selected: fs.index(),
+                        select: Box::new(|this: &mut Self, idx| {
+                            this.font_size = match idx {
+                                0 => FontSize::Small,
+                                1 => FontSize::Medium,
+                                _ => FontSize::Large,
+                            };
+                            let _ = this.tx.unbounded_send(Message::SetFontSize(this.font_size));
+                        }),
+                        options: vec![
+                            RadioItem {
+                                label: "Pequeno".into(),
+                                ..Default::default()
+                            },
+                            RadioItem {
+                                label: "Médio".into(),
+                                ..Default::default()
+                            },
+                            RadioItem {
+                                label: "Grande".into(),
+                                ..Default::default()
+                            },
+                        ],
+                    }
+                    .into(),
+                ],
                 ..Default::default()
             }
             .into(),
@@ -188,7 +209,7 @@ impl overlay::OverlayApp for State {
     type Message = Message;
 
     fn namespace() -> &'static str {
-        "lyrics-on-screen"
+        APP
     }
 
     fn update(&mut self, message: Self::Message) -> Task<Self::Message> {
@@ -225,11 +246,11 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
             } else {
                 state.caption.clear();
             }
-            overlay::save(state.font_size, state.enabled);
+            overlay::save(APP, state.font_size, state.enabled);
         }
         Message::SetFontSize(s) => {
             state.font_size = s;
-            overlay::save(state.font_size, state.enabled);
+            overlay::save(APP, state.font_size, state.enabled);
         }
         Message::CuesReceived(cues, sync) => {
             state.paused = sync.paused;
@@ -271,7 +292,10 @@ fn view(state: &State) -> Element<'_, Message> {
                     background: Some(iced::Background::Color(Color::from_rgba(
                         0.0, 0.0, 0.0, 0.6,
                     ))),
-                    border: iced::Border { radius: 6.0.into(), ..Default::default() },
+                    border: iced::Border {
+                        radius: 6.0.into(),
+                        ..Default::default()
+                    },
                     ..Default::default()
                 }
             }
@@ -287,7 +311,7 @@ fn view(state: &State) -> Element<'_, Message> {
 
 fn event_stream() -> BoxStream<'static, Message> {
     let (tx, rx) = mpsc::unbounded::<Message>();
-    let cfg = overlay::load_config();
+    let cfg = overlay::load_config(APP);
 
     ksni::TrayService::new(LyricsTray {
         tx: tx.clone(),
@@ -304,10 +328,12 @@ fn event_stream() -> BoxStream<'static, Message> {
 
 fn timeline_tick_stream() -> BoxStream<'static, Message> {
     let (tx, rx) = mpsc::unbounded::<Message>();
-    std::thread::spawn(move || loop {
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        if tx.unbounded_send(Message::TimelineTick).is_err() {
-            break;
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            if tx.unbounded_send(Message::TimelineTick).is_err() {
+                break;
+            }
         }
     });
     Box::pin(rx)
@@ -332,14 +358,31 @@ mod tests {
     }
 
     fn paused_sync(t: f64) -> TimelineSync {
-        TimelineSync { video_time: t, captured_at: Instant::now(), paused: true, playback_rate: 1.0 }
+        TimelineSync {
+            video_time: t,
+            captured_at: Instant::now(),
+            paused: true,
+            playback_rate: 1.0,
+        }
     }
 
     fn sample_cues() -> Vec<CueEntry> {
         vec![
-            CueEntry { start: 1.0, end: 3.0, text: "hello".into() },
-            CueEntry { start: 3.0, end: 5.0, text: "world".into() },
-            CueEntry { start: 5.0, end: 7.0, text: "foo".into() },
+            CueEntry {
+                start: 1.0,
+                end: 3.0,
+                text: "hello".into(),
+            },
+            CueEntry {
+                start: 3.0,
+                end: 5.0,
+                text: "world".into(),
+            },
+            CueEntry {
+                start: 5.0,
+                end: 7.0,
+                text: "foo".into(),
+            },
         ]
     }
 
@@ -358,8 +401,16 @@ mod tests {
     #[test]
     fn cue_at_none_outside_cues() {
         let cues = vec![
-            CueEntry { start: 1.0, end: 2.0, text: "a".into() },
-            CueEntry { start: 3.0, end: 4.0, text: "b".into() },
+            CueEntry {
+                start: 1.0,
+                end: 2.0,
+                text: "a".into(),
+            },
+            CueEntry {
+                start: 3.0,
+                end: 4.0,
+                text: "b".into(),
+            },
         ];
         assert_eq!(cue_at(&cues, 0.5), None);
         assert_eq!(cue_at(&cues, 2.0), None); // end é exclusivo
@@ -482,7 +533,10 @@ mod tests {
     fn cues_received_silent_when_disabled() {
         let mut s = test_state();
         s.enabled = false;
-        let _ = update(&mut s, Message::CuesReceived(sample_cues(), paused_sync(2.0)));
+        let _ = update(
+            &mut s,
+            Message::CuesReceived(sample_cues(), paused_sync(2.0)),
+        );
         assert_eq!(s.caption, "");
     }
 
@@ -525,5 +579,4 @@ mod tests {
         let _ = update(&mut s, Message::TimelineTick);
         assert_eq!(s.caption, "");
     }
-
 }
