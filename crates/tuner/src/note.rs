@@ -8,11 +8,11 @@ pub struct Note {
     pub cents: f64,
 }
 
+#[cfg_attr(not(feature = "capture"), allow(dead_code))]
 const NAMES: [&str; 12] = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
 
 /// Nearest note to `freq` (Hz), with reference `a4` (usually 440.0).
-// Used by the audio task (added in a later task).
-#[allow(dead_code)]
+#[cfg_attr(not(feature = "capture"), allow(dead_code))]
 pub fn frequency_to_note(freq: f64, a4: f64) -> Note {
     let midi = 69.0 + 12.0 * (freq / a4).log2();
     let rounded = midi.round();

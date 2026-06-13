@@ -3,8 +3,15 @@ name = "tuner"
 version.workspace = true
 edition.workspace = true
 
+[features]
+# Enable real microphone capture (requires ALSA dev headers on Linux).
+# Off by default so `cargo test` works on machines without libasound2-dev.
+capture = ["dep:cpal"]
+
 [dependencies]
 overlay = { path = "../overlay" }
 iced.workspace = true
 iced_layershell.workspace = true
 futures.workspace = true
+pitch-detection = "0.3"
+cpal = { version = "0.15", optional = true }

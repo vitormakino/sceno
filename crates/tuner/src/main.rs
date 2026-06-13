@@ -4,6 +4,7 @@ use iced::widget::{column, container, progress_bar, text};
 use iced::{Color, Element, Subscription, Task};
 use iced_layershell::to_layer_message;
 
+mod audio;
 mod note;
 use note::Note;
 
@@ -47,17 +48,16 @@ impl overlay::OverlayApp for State {
         container(content).center_x(iced::Fill).center_y(iced::Fill).into()
     }
     fn subscription(&self) -> Subscription<Message> {
-        Subscription::none()
+        Subscription::run(audio_stream)
     }
+}
+
+fn audio_stream() -> BoxStream<'static, Message> {
+    let (tx, rx) = mpsc::unbounded::<Message>();
+    std::thread::spawn(move || audio::run(tx));
+    Box::pin(rx)
 }
 
 fn main() -> iced_layershell::Result {
     overlay::run::<State>()
-}
-
-// Placeholder to keep BoxStream/mpsc imports used until the audio task wires them.
-#[allow(dead_code)]
-fn _unused() -> BoxStream<'static, Message> {
-    let (_tx, rx) = mpsc::unbounded::<Message>();
-    Box::pin(rx)
 }
