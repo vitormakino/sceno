@@ -113,15 +113,29 @@ fn api_search(q: &TrackQuery) -> Vec<LrclibTrack> {
     .unwrap_or_default()
 }
 
-/// Issue a request, retrying transient failures (network errors, 5xx) with a
-/// short backoff. A `404` is a definitive miss and returns immediately. The
-/// request is rebuilt per attempt since `ureq::Request` is single-use.
+/// Whether an HTTP status code warrants a retry. Only server-side `5xx`
+/// errors are transient; `4xx` (including `404`/`429`) are definitive.
+fn status_is_retryable(code: u16) -> bool {
+    (500..600).contains(&code)
+}
+
+/// Issue a request, retrying only transient failures (transport/network errors
+/// and `5xx`) with a short backoff. Any `4xx` is a definitive result and
+/// returns immediately. The request is rebuilt per attempt since
+/// `ureq::Request` is single-use.
 fn call_with_retry(build: impl Fn() -> ureq::Request) -> Option<String> {
     for attempt in 0..=HTTP_RETRIES {
         match build().call() {
             Ok(resp) => return resp.into_string().ok(),
-            Err(ureq::Error::Status(404, _)) => return None,
-            Err(_) if attempt < HTTP_RETRIES => std::thread::sleep(RETRY_BACKOFF),
+            Err(ureq::Error::Status(code, _))
+                if status_is_retryable(code) && attempt < HTTP_RETRIES =>
+            {
+                std::thread::sleep(RETRY_BACKOFF);
+            }
+            Err(ureq::Error::Transport(_)) if attempt < HTTP_RETRIES => {
+                std::thread::sleep(RETRY_BACKOFF);
+            }
+            // 4xx, a non-retryable status, or retries exhausted.
             Err(_) => return None,
         }
     }
@@ -256,5 +270,17 @@ mod tests {
     fn cache_disabled_in_tests() {
         // Guards against tests accidentally depending on a real cache dir.
         assert!(cache_read(&q()).is_none());
+    }
+
+    #[test]
+    fn only_5xx_status_is_retryable() {
+        // Client errors (4xx) are definitive — never retried.
+        assert!(!status_is_retryable(400));
+        assert!(!status_is_retryable(403));
+        assert!(!status_is_retryable(404));
+        assert!(!status_is_retryable(429));
+        // Server errors (5xx) are transient — retry.
+        assert!(status_is_retryable(500));
+        assert!(status_is_retryable(503));
     }
 }
