@@ -1,0 +1,12 @@
+[package]
+name = "tuner"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+overlay = { path = "../overlay" }
+iced.workspace = true
+iced_layershell.workspace = true
+futures.workspace = true
+pitch-detection = "0.3"
+cpal = "0.15"
