@@ -8,7 +8,9 @@ pub struct Note {
     pub cents: f64,
 }
 
-const NAMES: [&str; 12] = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
+const NAMES: [&str; 12] = [
+    "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+];
 
 /// Nearest note to `freq` (Hz), with reference `a4` (usually 440.0).
 pub fn frequency_to_note(freq: f64, a4: f64) -> Note {
@@ -18,7 +20,11 @@ pub fn frequency_to_note(freq: f64, a4: f64) -> Note {
     let semitone = rounded as i64;
     let name = NAMES[semitone.rem_euclid(12) as usize];
     let octave = (semitone.div_euclid(12) - 1) as i32; // MIDI: note 0 = C-1
-    Note { name, octave, cents }
+    Note {
+        name,
+        octave,
+        cents,
+    }
 }
 
 /// Map cents in [-50, 50] to a meter position in [0.0, 1.0] (0.5 = in tune).
@@ -34,7 +40,9 @@ pub fn is_in_tune(cents: f64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn approx(a: f64, b: f64, eps: f64) -> bool { (a - b).abs() < eps }
+    fn approx(a: f64, b: f64, eps: f64) -> bool {
+        (a - b).abs() < eps
+    }
 
     #[test]
     fn a4_is_440() {

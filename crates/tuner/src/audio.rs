@@ -1,7 +1,7 @@
 //! Microphone capture + pitch detection feeding Message::PitchUpdate.
 
-use pitch_detection::detector::mcleod::McLeodDetector;
 use pitch_detection::detector::PitchDetector;
+use pitch_detection::detector::mcleod::McLeodDetector;
 
 /// Estimate the fundamental frequency of a mono f32 buffer, or `None` if no
 /// clear pitch. `sample_rate` in Hz; `min_clarity` in 0..1.

@@ -3,7 +3,7 @@
 mod paths;
 mod settings;
 pub use paths::{cache_dir, config_dir};
-pub use settings::{load_config, save, FontSize, Position, SavedConfig};
+pub use settings::{FontSize, Position, SavedConfig, load_config, save};
 
 use iced::Element;
 use iced::Subscription;
@@ -71,23 +71,28 @@ pub trait OverlayApp: Default + Sized + 'static {
 pub fn run<A: OverlayApp>() -> iced_layershell::Result {
     ensure_single_instance(A::namespace());
 
-    iced_layershell::application(A::default, A::namespace(), update_wrapper::<A>, view_wrapper::<A>)
-        .subscription(|state: &A| state.subscription())
-        .style(|_state, _theme| iced::theme::Style {
-            background_color: iced::Color::TRANSPARENT,
-            text_color: iced::Color::WHITE,
-        })
-        .layer_settings(LayerShellSettings {
-            anchor: Anchor::Bottom | Anchor::Left | Anchor::Right,
-            layer: Layer::Top,
-            exclusive_zone: 0,
-            size: Some((0, 80)),
-            margin: (0, 0, 40, 0),
-            keyboard_interactivity: KeyboardInteractivity::None,
-            events_transparent: true,
-            ..Default::default()
-        })
-        .run()
+    iced_layershell::application(
+        A::default,
+        A::namespace(),
+        update_wrapper::<A>,
+        view_wrapper::<A>,
+    )
+    .subscription(|state: &A| state.subscription())
+    .style(|_state, _theme| iced::theme::Style {
+        background_color: iced::Color::TRANSPARENT,
+        text_color: iced::Color::WHITE,
+    })
+    .layer_settings(LayerShellSettings {
+        anchor: Anchor::Bottom | Anchor::Left | Anchor::Right,
+        layer: Layer::Top,
+        exclusive_zone: 0,
+        size: Some((0, 80)),
+        margin: (0, 0, 40, 0),
+        keyboard_interactivity: KeyboardInteractivity::None,
+        events_transparent: true,
+        ..Default::default()
+    })
+    .run()
 }
 
 // Free functions with the exact signature iced_layershell::application expects,

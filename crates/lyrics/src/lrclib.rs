@@ -147,7 +147,9 @@ fn call_with_retry(build: impl Fn() -> ureq::Request) -> Option<String> {
 fn best_match(tracks: Vec<LrclibTrack>, target: Option<u64>) -> Option<LrclibTrack> {
     let mut usable = tracks.into_iter().filter(|t| t.usable_synced().is_some());
     match target {
-        Some(d) => usable.min_by_key(|t| (t.duration.unwrap_or(0.0) - d as f64).abs().round() as i64),
+        Some(d) => {
+            usable.min_by_key(|t| (t.duration.unwrap_or(0.0) - d as f64).abs().round() as i64)
+        }
         None => usable.next(),
     }
 }
@@ -200,8 +202,18 @@ mod tests {
 
     #[test]
     fn key_is_case_insensitive_and_stable() {
-        let a = TrackQuery { artist: "ABBA".into(), title: "SOS".into(), album: None, duration: Some(200) };
-        let b = TrackQuery { artist: "abba".into(), title: "sos".into(), album: None, duration: Some(200) };
+        let a = TrackQuery {
+            artist: "ABBA".into(),
+            title: "SOS".into(),
+            album: None,
+            duration: Some(200),
+        };
+        let b = TrackQuery {
+            artist: "abba".into(),
+            title: "sos".into(),
+            album: None,
+            duration: Some(200),
+        };
         assert_eq!(a.key(), b.key());
         assert_eq!(a.key(), "abba|sos||200");
     }
@@ -219,7 +231,10 @@ mod tests {
             "syncedLyrics": "[00:15.00]Now here you go again"
         }"#;
         let t: LrclibTrack = serde_json::from_str(json).unwrap();
-        assert_eq!(t.usable_synced().as_deref(), Some("[00:15.00]Now here you go again"));
+        assert_eq!(
+            t.usable_synced().as_deref(),
+            Some("[00:15.00]Now here you go again")
+        );
         assert!(!t.instrumental);
     }
 
@@ -240,9 +255,21 @@ mod tests {
     #[test]
     fn best_match_picks_closest_duration() {
         let tracks = vec![
-            LrclibTrack { duration: Some(300.0), synced_lyrics: Some("[00:01.00]a".into()), ..Default::default() },
-            LrclibTrack { duration: Some(258.0), synced_lyrics: Some("[00:01.00]b".into()), ..Default::default() },
-            LrclibTrack { duration: Some(200.0), synced_lyrics: Some("[00:01.00]c".into()), ..Default::default() },
+            LrclibTrack {
+                duration: Some(300.0),
+                synced_lyrics: Some("[00:01.00]a".into()),
+                ..Default::default()
+            },
+            LrclibTrack {
+                duration: Some(258.0),
+                synced_lyrics: Some("[00:01.00]b".into()),
+                ..Default::default()
+            },
+            LrclibTrack {
+                duration: Some(200.0),
+                synced_lyrics: Some("[00:01.00]c".into()),
+                ..Default::default()
+            },
         ];
         let picked = best_match(tracks, Some(257)).unwrap();
         assert_eq!(picked.synced_lyrics.as_deref(), Some("[00:01.00]b"));
@@ -251,8 +278,16 @@ mod tests {
     #[test]
     fn best_match_skips_candidates_without_synced() {
         let tracks = vec![
-            LrclibTrack { duration: Some(257.0), synced_lyrics: None, ..Default::default() },
-            LrclibTrack { duration: Some(400.0), synced_lyrics: Some("[00:01.00]only".into()), ..Default::default() },
+            LrclibTrack {
+                duration: Some(257.0),
+                synced_lyrics: None,
+                ..Default::default()
+            },
+            LrclibTrack {
+                duration: Some(400.0),
+                synced_lyrics: Some("[00:01.00]only".into()),
+                ..Default::default()
+            },
         ];
         let picked = best_match(tracks, Some(257)).unwrap();
         assert_eq!(picked.synced_lyrics.as_deref(), Some("[00:01.00]only"));
@@ -260,7 +295,11 @@ mod tests {
 
     #[test]
     fn best_match_none_when_no_synced() {
-        let tracks = vec![LrclibTrack { duration: Some(257.0), synced_lyrics: None, ..Default::default() }];
+        let tracks = vec![LrclibTrack {
+            duration: Some(257.0),
+            synced_lyrics: None,
+            ..Default::default()
+        }];
         assert!(best_match(tracks, Some(257)).is_none());
     }
 

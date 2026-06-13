@@ -82,7 +82,10 @@ pub fn default_enabled() -> bool {
 
 impl Default for SavedConfig {
     fn default() -> Self {
-        SavedConfig { font_size_idx: 1, enabled: true }
+        SavedConfig {
+            font_size_idx: 1,
+            enabled: true,
+        }
     }
 }
 
@@ -107,7 +110,10 @@ pub fn save(app: &str, font_size: FontSize, enabled: bool) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let cfg = SavedConfig { font_size_idx: font_size.index(), enabled };
+    let cfg = SavedConfig {
+        font_size_idx: font_size.index(),
+        enabled,
+    };
     if let Ok(json) = serde_json::to_string(&cfg) {
         let _ = std::fs::write(path, json);
     }
@@ -121,7 +127,11 @@ mod tests {
 
     #[test]
     fn fontsize_from_idx_roundtrips() {
-        for (i, expected) in [(0, FontSize::Small), (1, FontSize::Medium), (2, FontSize::Large)] {
+        for (i, expected) in [
+            (0, FontSize::Small),
+            (1, FontSize::Medium),
+            (2, FontSize::Large),
+        ] {
             assert_eq!(FontSize::from_idx(i), expected);
             assert_eq!(expected.index(), i);
         }
@@ -134,7 +144,10 @@ mod tests {
 
     #[test]
     fn saved_config_roundtrips_json() {
-        let cfg = SavedConfig { font_size_idx: 2, enabled: false };
+        let cfg = SavedConfig {
+            font_size_idx: 2,
+            enabled: false,
+        };
         let json = serde_json::to_string(&cfg).unwrap();
         let loaded: SavedConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(loaded.font_size_idx, 2);
