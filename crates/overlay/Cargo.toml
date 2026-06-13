@@ -1,16 +1,12 @@
 [package]
-name = "lyrics"
+name = "overlay"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-overlay = { path = "../overlay" }
 iced.workspace = true
 iced_layershell.workspace = true
-futures.workspace = true
+ksni.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-ksni.workspace = true
 libc.workspace = true
-mpris.workspace = true
-ureq.workspace = true

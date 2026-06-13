@@ -2,18 +2,14 @@ use futures::channel::mpsc;
 use futures::stream::BoxStream;
 use iced::widget::{container, text};
 use iced::{Color, Element, Subscription, Task};
-use iced_layershell::reexport::{Anchor, KeyboardInteractivity, Layer};
-use iced_layershell::settings::LayerShellSettings;
+use iced_layershell::reexport::Anchor;
 use iced_layershell::to_layer_message;
 use serde::{Deserialize, Serialize};
-use std::os::unix::io::AsRawFd;
 use std::time::Instant;
 
 mod lrc;
 mod lrclib;
 mod player;
-
-const LOCK_PATH: &str = "/tmp/lyrics-on-screen.lock";
 
 // ── Settings types ────────────────────────────────────────────────────────────
 
@@ -294,56 +290,37 @@ impl ksni::Tray for LyricsTray {
     }
 }
 
-// ── iced app ──────────────────────────────────────────────────────────────────
+// ── OverlayApp impl ───────────────────────────────────────────────────────────
 
-fn ensure_single_instance() {
-    let file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(LOCK_PATH)
-        .unwrap_or_else(|e| {
-            eprintln!("[lyrics-on-screen] não foi possível abrir lock file: {e}");
-            std::process::exit(1);
-        });
-    // LOCK_EX | LOCK_NB — exclusive, non-blocking
-    let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if ret != 0 {
-        eprintln!("[lyrics-on-screen] já está em execução");
-        std::process::exit(0);
+impl overlay::OverlayApp for State {
+    type Message = Message;
+
+    fn namespace() -> &'static str {
+        "lyrics-on-screen"
     }
-    // Keep fd open for the process lifetime; kernel releases the lock on exit.
-    std::mem::forget(file);
+
+    fn update(&mut self, message: Self::Message) -> Task<Self::Message> {
+        update(self, message)
+    }
+
+    fn view(&self) -> Element<'_, Self::Message> {
+        view(self)
+    }
+
+    fn subscription(&self) -> Subscription<Self::Message> {
+        let events = Subscription::run(event_stream);
+        // Only tick when playing — paused playback needs no interpolation.
+        let needs_tick = self.enabled && !self.cues.is_empty() && !self.paused;
+        if needs_tick {
+            Subscription::batch([events, Subscription::run(timeline_tick_stream)])
+        } else {
+            events
+        }
+    }
 }
 
 fn main() -> iced_layershell::Result {
-    ensure_single_instance();
-    iced_layershell::application(State::default, "lyrics-on-screen", update, view)
-        .subscription(|state| {
-            let events = Subscription::run(event_stream);
-            // Only tick when playing — paused playback needs no interpolation.
-            let needs_tick = state.enabled && !state.cues.is_empty() && !state.paused;
-            if needs_tick {
-                Subscription::batch([events, Subscription::run(timeline_tick_stream)])
-            } else {
-                events
-            }
-        })
-        .style(|_state, _theme| iced::theme::Style {
-            background_color: Color::TRANSPARENT,
-            text_color: Color::WHITE,
-        })
-        .layer_settings(LayerShellSettings {
-            anchor: Anchor::Bottom | Anchor::Left | Anchor::Right,
-            layer: Layer::Top,
-            exclusive_zone: 0,
-            size: Some((0, 80)),
-            margin: (0, 0, 40, 0),
-            keyboard_interactivity: KeyboardInteractivity::None,
-            events_transparent: true,
-            ..Default::default()
-        })
-        .run()
+    overlay::run::<State>()
 }
 
 fn update(state: &mut State, msg: Message) -> Task<Message> {

@@ -2022,6 +2022,7 @@ dependencies = [
  "ksni",
  "libc",
  "mpris",
+ "overlay",
  "serde",
  "serde_json",
  "ureq",
@@ -2626,6 +2627,18 @@ checksum = "9aa2b01e1d916879f73a53d01d1d6cee68adbb31d6d9177a8cfce093cced1d50"
 dependencies = [
  "futures-core",
  "pin-project-lite",
+]
+
+[[package]]
+name = "overlay"
+version = "0.1.0"
+dependencies = [
+ "iced",
+ "iced_layershell",
+ "ksni",
+ "libc",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
