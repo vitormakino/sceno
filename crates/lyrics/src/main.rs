@@ -107,7 +107,7 @@ impl ksni::Tray for LyricsTray {
         "audio-x-generic".into()
     }
     fn title(&self) -> String {
-        "Lyrics on Screen".into()
+        "sceno · lyrics".into()
     }
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
         use ksni::menu::*;

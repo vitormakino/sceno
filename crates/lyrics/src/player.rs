@@ -184,9 +184,9 @@ fn find_ci(haystack: &str, needle: &str) -> Option<usize> {
     (0..=h.len() - n.len()).find(|&i| h[i..i + n.len()].eq_ignore_ascii_case(n))
 }
 
-/// Lightweight stderr tracing, enabled with `LOS_DEBUG=1`.
+/// Lightweight stderr tracing, enabled with `SCENO_DEBUG=1`.
 fn debug(args: std::fmt::Arguments) {
-    if std::env::var_os("LOS_DEBUG").is_some() {
+    if std::env::var_os("SCENO_DEBUG").is_some() {
         eprintln!("[player] {args}");
     }
 }
