@@ -1,5 +1,8 @@
 //! Reusable Wayland layer-shell overlay shell shared by the overlay apps.
 
+mod settings;
+pub use settings::{load_config, save, FontSize, Position, SavedConfig};
+
 use iced::Element;
 use iced::Subscription;
 use iced::Task;
