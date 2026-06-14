@@ -4,7 +4,7 @@ mod paths;
 mod settings;
 mod trace;
 pub use paths::{cache_dir, config_dir};
-pub use settings::{FontSize, Position, SavedConfig, load_config, save};
+pub use settings::{FontSize, Position, load_config, save};
 pub use trace::{debug, debug_enabled};
 
 use iced::Element;

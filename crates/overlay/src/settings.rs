@@ -1,5 +1,4 @@
 use iced_layershell::reexport::Anchor;
-use serde::{Deserialize, Serialize};
 
 // ── Position ──────────────────────────────────────────────────────────────────
 
@@ -63,46 +62,20 @@ impl FontSize {
     }
 }
 
-// ── SavedConfig ───────────────────────────────────────────────────────────────
-
-#[derive(Serialize, Deserialize)]
-pub struct SavedConfig {
-    #[serde(default = "default_font_idx")]
-    pub font_size_idx: usize,
-    #[serde(default = "default_enabled")]
-    pub enabled: bool,
-}
-
-pub fn default_font_idx() -> usize {
-    1
-}
-pub fn default_enabled() -> bool {
-    true
-}
-
-impl Default for SavedConfig {
-    fn default() -> Self {
-        SavedConfig {
-            font_size_idx: 1,
-            enabled: true,
-        }
-    }
-}
-
 // ── Config I/O ────────────────────────────────────────────────────────────────
 
 pub fn config_path(app: &str) -> Option<std::path::PathBuf> {
     crate::paths::config_dir(app).map(|d| d.join("config.json"))
 }
 
-pub fn load_config(app: &str) -> SavedConfig {
+pub fn load_config<T: Default + serde::de::DeserializeOwned>(app: &str) -> T {
     config_path(app)
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default()
 }
 
-pub fn save(app: &str, font_size: FontSize, enabled: bool) {
+pub fn save<T: serde::Serialize>(app: &str, cfg: &T) {
     if cfg!(test) {
         return;
     }
@@ -110,11 +83,7 @@ pub fn save(app: &str, font_size: FontSize, enabled: bool) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let cfg = SavedConfig {
-        font_size_idx: font_size.index(),
-        enabled,
-    };
-    if let Ok(json) = serde_json::to_string(&cfg) {
+    if let Ok(json) = serde_json::to_string(cfg) {
         let _ = std::fs::write(path, json);
     }
 }
@@ -140,33 +109,5 @@ mod tests {
     #[test]
     fn fontsize_unknown_idx_defaults_to_medium() {
         assert_eq!(FontSize::from_idx(99), FontSize::Medium);
-    }
-
-    #[test]
-    fn saved_config_roundtrips_json() {
-        let cfg = SavedConfig {
-            font_size_idx: 2,
-            enabled: false,
-        };
-        let json = serde_json::to_string(&cfg).unwrap();
-        let loaded: SavedConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(loaded.font_size_idx, 2);
-        assert!(!loaded.enabled);
-    }
-
-    #[test]
-    fn saved_config_missing_fields_use_defaults() {
-        let cfg: SavedConfig = serde_json::from_str("{}").unwrap();
-        assert_eq!(cfg.font_size_idx, 1); // Medium
-        assert!(cfg.enabled);
-    }
-
-    #[test]
-    fn saved_config_ignores_legacy_mode_idx() {
-        // Old configs carried a mode_idx field; it must be ignored, not rejected.
-        let cfg: SavedConfig =
-            serde_json::from_str(r#"{"font_size_idx":2,"mode_idx":1,"enabled":true}"#).unwrap();
-        assert_eq!(cfg.font_size_idx, 2);
-        assert!(cfg.enabled);
     }
 }

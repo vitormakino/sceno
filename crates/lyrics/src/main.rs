@@ -6,9 +6,11 @@ use iced_layershell::to_layer_message;
 use overlay::{FontSize, Position};
 use std::time::Instant;
 
+mod config;
 mod lrc;
 mod lrclib;
 mod player;
+use config::SavedConfig;
 
 /// App name: used for the Wayland namespace, the single-instance lock, and the
 /// config/cache directory (`~/.config/sceno/lyrics`, `~/.cache/sceno/lyrics`).
@@ -72,7 +74,7 @@ struct State {
 
 impl Default for State {
     fn default() -> Self {
-        let cfg = overlay::load_config(APP);
+        let cfg: SavedConfig = overlay::load_config(APP);
         State {
             caption: String::new(),
             enabled: cfg.enabled,
@@ -246,11 +248,23 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
             } else {
                 state.caption.clear();
             }
-            overlay::save(APP, state.font_size, state.enabled);
+            overlay::save(
+                APP,
+                &SavedConfig {
+                    font_size_idx: state.font_size.index(),
+                    enabled: state.enabled,
+                },
+            );
         }
         Message::SetFontSize(s) => {
             state.font_size = s;
-            overlay::save(APP, state.font_size, state.enabled);
+            overlay::save(
+                APP,
+                &SavedConfig {
+                    font_size_idx: state.font_size.index(),
+                    enabled: state.enabled,
+                },
+            );
         }
         Message::CuesReceived(cues, sync) => {
             state.paused = sync.paused;
@@ -309,7 +323,7 @@ fn view(state: &State) -> Element<'_, Message> {
 
 fn event_stream() -> BoxStream<'static, Message> {
     let (tx, rx) = mpsc::unbounded::<Message>();
-    let cfg = overlay::load_config(APP);
+    let cfg: SavedConfig = overlay::load_config(APP);
 
     ksni::TrayService::new(LyricsTray {
         tx: tx.clone(),
