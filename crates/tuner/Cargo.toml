@@ -9,7 +9,7 @@ repository.workspace = true
 
 [dependencies]
 overlay = { path = "../overlay" }
-iced.workspace = true
+iced = { workspace = true, features = ["canvas"] }
 iced_layershell.workspace = true
 futures.workspace = true
 pitch-detection = "0.3"
