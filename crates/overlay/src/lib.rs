@@ -77,6 +77,36 @@ pub trait OverlayApp: Default + Sized + 'static {
 
     /// Subscriptions to run while the app is alive.
     fn subscription(&self) -> Subscription<Self::Message>;
+
+    // ── Surface geometry (defaults preserve the legacy 80px bottom strip) ──────
+
+    /// Surface height in px. Default 80 (the thin caption/meter strip).
+    fn surface_height() -> u32 {
+        stack::SURFACE_HEIGHT as u32
+    }
+
+    /// Layer-shell anchor edges. Default bottom + left + right (full-width strip).
+    fn anchor() -> Anchor {
+        Anchor::Bottom | Anchor::Left | Anchor::Right
+    }
+
+    /// Whether pointer events pass through the surface. Default `true` (click-through).
+    fn events_transparent() -> bool {
+        true
+    }
+
+    /// Whether this app joins the shared bottom-edge auto-stacking. Default `true`.
+    /// Apps that own a large, fixed-geometry surface (e.g. a karaoke panel) return
+    /// `false` so they don't claim a strip slot or reflow with the strips.
+    fn stacks() -> bool {
+        true
+    }
+
+    /// Fixed surface margin, used only when [`Self::stacks`] is `false`.
+    /// Defaults to the bottom-most slot's margin.
+    fn initial_margin() -> Margin {
+        margin_for_slot(0)
+    }
 }
 
 /// Wires an [`OverlayApp`] into `iced_layershell` and blocks until exit.
@@ -87,20 +117,27 @@ pub trait OverlayApp: Default + Sized + 'static {
 pub fn run<A: OverlayApp>() -> iced_layershell::Result {
     ensure_single_instance(A::namespace());
 
-    // Claim our stack slot synchronously so the surface is born at the right margin (no
-    // reposition flash). The guard is handed to the reflow subscription for live compaction.
-    let guard = stack::claim_lowest();
-    let initial_margin = guard.margin();
-    debug(
-        "stack",
-        format_args!(
-            "{} claimed slot {} margin {:?}",
-            A::namespace(),
-            guard.index(),
-            initial_margin
-        ),
-    );
-    let _ = STACK_GUARD.set(Mutex::new(Some(guard)));
+    // Stacking apps claim a slot synchronously so the surface is born at the right margin
+    // (no reposition flash); the guard is handed to the reflow subscription for live
+    // compaction. Non-stacking apps own a fixed geometry and skip the slot pool entirely.
+    let stacks = A::stacks();
+    let initial_margin = if stacks {
+        let guard = stack::claim_lowest();
+        let margin = guard.margin();
+        debug(
+            "stack",
+            format_args!(
+                "{} claimed slot {} margin {:?}",
+                A::namespace(),
+                guard.index(),
+                margin
+            ),
+        );
+        let _ = STACK_GUARD.set(Mutex::new(Some(guard)));
+        margin
+    } else {
+        A::initial_margin()
+    };
 
     iced_layershell::application(
         A::default,
@@ -108,21 +145,25 @@ pub fn run<A: OverlayApp>() -> iced_layershell::Result {
         update_wrapper::<A>,
         view_wrapper::<A>,
     )
-    .subscription(|state: &A| {
-        Subscription::batch([state.subscription(), stacking_subscription::<A>()])
+    .subscription(move |state: &A| {
+        if stacks {
+            Subscription::batch([state.subscription(), stacking_subscription::<A>()])
+        } else {
+            state.subscription()
+        }
     })
     .style(|_state, _theme| iced::theme::Style {
         background_color: iced::Color::TRANSPARENT,
         text_color: iced::Color::WHITE,
     })
     .layer_settings(LayerShellSettings {
-        anchor: Anchor::Bottom | Anchor::Left | Anchor::Right,
+        anchor: A::anchor(),
         layer: Layer::Top,
         exclusive_zone: 0,
-        size: Some((0, 80)),
+        size: Some((0, A::surface_height())),
         margin: initial_margin,
         keyboard_interactivity: KeyboardInteractivity::None,
-        events_transparent: true,
+        events_transparent: A::events_transparent(),
         ..Default::default()
     })
     .run()
