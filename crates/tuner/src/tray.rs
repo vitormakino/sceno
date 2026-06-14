@@ -2,8 +2,8 @@
 
 use futures::channel::mpsc::UnboundedSender;
 
-use crate::meter::MeterStyle;
 use crate::Message;
+use crate::meter::MeterStyle;
 
 pub struct TunerTray {
     pub tx: UnboundedSender<Message>,
@@ -40,9 +40,7 @@ impl ksni::Tray for TunerTray {
                         selected: style.index(),
                         select: Box::new(|this: &mut Self, idx| {
                             this.style = MeterStyle::from_idx(idx);
-                            let _ = this
-                                .tx
-                                .unbounded_send(Message::SetMeterStyle(this.style));
+                            let _ = this.tx.unbounded_send(Message::SetMeterStyle(this.style));
                         }),
                         options: vec![
                             RadioItem {

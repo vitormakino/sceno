@@ -80,7 +80,11 @@ impl overlay::OverlayApp for State {
         Task::none()
     }
     fn view(&self) -> Element<'_, Message> {
-        let empty = || container(text("")).center_x(iced::Fill).center_y(iced::Fill);
+        let empty = || {
+            container(text(""))
+                .center_x(iced::Fill)
+                .center_y(iced::Fill)
+        };
         if !self.enabled {
             return empty().into();
         }
@@ -113,16 +117,18 @@ impl overlay::OverlayApp for State {
         .spacing(2);
 
         container(
-            container(body).padding([6, 18]).style(|_theme| {
-                container::Style {
-                    background: Some(iced::Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.45))),
+            container(body)
+                .padding([6, 18])
+                .style(|_theme| container::Style {
+                    background: Some(iced::Background::Color(Color::from_rgba(
+                        0.0, 0.0, 0.0, 0.45,
+                    ))),
                     border: iced::Border {
                         radius: 12.0.into(),
                         ..Default::default()
                     },
                     ..Default::default()
-                }
-            }),
+                }),
         )
         .center_x(iced::Fill)
         .center_y(iced::Fill)
@@ -157,10 +163,12 @@ fn event_stream() -> BoxStream<'static, Message> {
 
 fn strobe_tick_stream() -> BoxStream<'static, Message> {
     let (tx, rx) = mpsc::unbounded::<Message>();
-    std::thread::spawn(move || loop {
-        std::thread::sleep(std::time::Duration::from_millis(33));
-        if tx.unbounded_send(Message::StrobeTick).is_err() {
-            break;
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(33));
+            if tx.unbounded_send(Message::StrobeTick).is_err() {
+                break;
+            }
         }
     });
     Box::pin(rx)

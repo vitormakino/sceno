@@ -149,7 +149,11 @@ mod tests {
 
     #[test]
     fn style_index_roundtrips() {
-        for s in [MeterStyle::Needle, MeterStyle::CenterBar, MeterStyle::Strobe] {
+        for s in [
+            MeterStyle::Needle,
+            MeterStyle::CenterBar,
+            MeterStyle::Strobe,
+        ] {
             assert_eq!(MeterStyle::from_idx(s.index()), s);
         }
     }
