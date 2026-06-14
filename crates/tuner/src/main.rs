@@ -18,6 +18,7 @@ enum Message {
     PitchUpdate(Option<Note>),
     SetEnabled(bool),
     SetMeterStyle(meter::MeterStyle),
+    StrobeTick,
 }
 
 struct State {
@@ -66,6 +67,13 @@ impl overlay::OverlayApp for State {
             Message::SetMeterStyle(s) => {
                 self.style = s;
                 self.persist();
+            }
+            Message::StrobeTick => {
+                if let Some(n) = &self.note {
+                    let speed = (n.cents.clamp(-50.0, 50.0) / 50.0) as f32; // -1.0..1.0
+                    self.strobe_phase =
+                        (self.strobe_phase + speed * 6.0).rem_euclid(meter::STROBE_BAND);
+                }
             }
             _ => {}
         }
@@ -121,7 +129,13 @@ impl overlay::OverlayApp for State {
         .into()
     }
     fn subscription(&self) -> Subscription<Message> {
-        Subscription::run(event_stream)
+        let events = Subscription::run(event_stream);
+        if self.enabled && self.style == meter::MeterStyle::Strobe {
+            let ticks = Subscription::run(strobe_tick_stream);
+            Subscription::batch([events, ticks])
+        } else {
+            events
+        }
     }
 }
 
@@ -138,6 +152,17 @@ fn event_stream() -> BoxStream<'static, Message> {
 
     std::thread::spawn(move || audio::run(tx));
 
+    Box::pin(rx)
+}
+
+fn strobe_tick_stream() -> BoxStream<'static, Message> {
+    let (tx, rx) = mpsc::unbounded::<Message>();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_millis(33));
+        if tx.unbounded_send(Message::StrobeTick).is_err() {
+            break;
+        }
+    });
     Box::pin(rx)
 }
 

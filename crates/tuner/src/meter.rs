@@ -124,7 +124,18 @@ impl<Message> canvas::Program<Message> for Meter {
                 );
             }
             MeterStyle::Strobe => {
-                // Implemented in the strobe task.
+                // Repeating vertical bands scrolled by `phase`; they appear to
+                // freeze near 0¢ because `phase` barely advances there (see update).
+                let offset = self.phase.rem_euclid(STROBE_BAND);
+                let mut x = -STROBE_BAND + offset;
+                while x < w {
+                    frame.fill_rectangle(
+                        Point::new(x, 2.0),
+                        Size::new(STROBE_BAND / 2.0, h - 4.0),
+                        self.color,
+                    );
+                    x += STROBE_BAND;
+                }
             }
         }
 
