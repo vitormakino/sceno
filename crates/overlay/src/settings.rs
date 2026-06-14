@@ -1,34 +1,3 @@
-use iced_layershell::reexport::Anchor;
-
-// ── Position ──────────────────────────────────────────────────────────────────
-
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub enum Position {
-    Bottom,
-    Top,
-}
-
-impl Position {
-    pub fn anchor(self) -> Anchor {
-        match self {
-            Position::Bottom => Anchor::Bottom | Anchor::Left | Anchor::Right,
-            Position::Top => Anchor::Top | Anchor::Left | Anchor::Right,
-        }
-    }
-    pub fn margin(self) -> (i32, i32, i32, i32) {
-        match self {
-            Position::Bottom => (0, 0, 40, 0),
-            Position::Top => (40, 0, 0, 0),
-        }
-    }
-    pub fn index(self) -> usize {
-        match self {
-            Position::Bottom => 0,
-            Position::Top => 1,
-        }
-    }
-}
-
 // ── FontSize ──────────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, PartialEq, Debug)]

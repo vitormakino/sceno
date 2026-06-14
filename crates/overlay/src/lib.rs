@@ -2,11 +2,14 @@
 
 mod paths;
 mod settings;
+mod stack;
 mod trace;
 pub use paths::{cache_dir, config_dir};
-pub use settings::{FontSize, Position, load_config, save};
+pub use settings::{FontSize, load_config, save};
+pub use stack::{Margin, margin_for_slot};
 pub use trace::{debug, debug_enabled};
 
+use futures::stream::{self, BoxStream, StreamExt};
 use iced::Element;
 use iced::Subscription;
 use iced::Task;
@@ -14,6 +17,12 @@ use iced_layershell::actions::LayerShellCustomActionWithId;
 use iced_layershell::reexport::{Anchor, KeyboardInteractivity, Layer};
 use iced_layershell::settings::LayerShellSettings;
 use std::os::unix::io::AsRawFd;
+use std::sync::{Mutex, OnceLock};
+
+/// Hands the slot claimed synchronously in [`run`] to the reflow subscription, which takes it
+/// exactly once. Safe as a process-global because `ensure_single_instance` guarantees one
+/// process per app id.
+static STACK_GUARD: OnceLock<Mutex<Option<stack::SlotGuard>>> = OnceLock::new();
 
 /// Exits the process if another instance of `app` is already running.
 /// Uses a per-app `flock(2)` lock under `$XDG_RUNTIME_DIR` (fallback `/tmp`).
@@ -55,6 +64,11 @@ pub trait OverlayApp: Default + Sized + 'static {
     /// The Wayland namespace / app-id for the layer shell surface.
     fn namespace() -> &'static str;
 
+    /// Construct the app's layer-shell margin-change message. Each app implements this as
+    /// `Message::MarginChange(margin)` (the variant `#[to_layer_message]` generates), letting
+    /// the shared auto-stacker reposition the surface generically.
+    fn margin_changed(margin: Margin) -> Self::Message;
+
     /// Handle a message and (optionally) return a follow-up `Task`.
     fn update(&mut self, message: Self::Message) -> Task<Self::Message>;
 
@@ -73,13 +87,30 @@ pub trait OverlayApp: Default + Sized + 'static {
 pub fn run<A: OverlayApp>() -> iced_layershell::Result {
     ensure_single_instance(A::namespace());
 
+    // Claim our stack slot synchronously so the surface is born at the right margin (no
+    // reposition flash). The guard is handed to the reflow subscription for live compaction.
+    let guard = stack::claim_lowest();
+    let initial_margin = guard.margin();
+    debug(
+        "stack",
+        format_args!(
+            "{} claimed slot {} margin {:?}",
+            A::namespace(),
+            guard.index(),
+            initial_margin
+        ),
+    );
+    let _ = STACK_GUARD.set(Mutex::new(Some(guard)));
+
     iced_layershell::application(
         A::default,
         A::namespace(),
         update_wrapper::<A>,
         view_wrapper::<A>,
     )
-    .subscription(|state: &A| state.subscription())
+    .subscription(|state: &A| {
+        Subscription::batch([state.subscription(), stacking_subscription::<A>()])
+    })
     .style(|_state, _theme| iced::theme::Style {
         background_color: iced::Color::TRANSPARENT,
         text_color: iced::Color::WHITE,
@@ -89,12 +120,30 @@ pub fn run<A: OverlayApp>() -> iced_layershell::Result {
         layer: Layer::Top,
         exclusive_zone: 0,
         size: Some((0, 80)),
-        margin: (0, 0, 40, 0),
+        margin: initial_margin,
         keyboard_interactivity: KeyboardInteractivity::None,
         events_transparent: true,
         ..Default::default()
     })
     .run()
+}
+
+/// Subscription that repositions the surface as sibling overlays open/close.
+fn stacking_subscription<A: OverlayApp>() -> Subscription<A::Message> {
+    Subscription::run(stack_reflow_recipe::<A>)
+}
+
+/// Recipe for [`stacking_subscription`]: takes the claimed slot guard once and maps the
+/// reflow margin stream into the app's own `MarginChange` message. Monomorphized per app, so
+/// its `Subscription::run` identity is stable for the process.
+fn stack_reflow_recipe<A: OverlayApp>() -> BoxStream<'static, A::Message> {
+    let guard = STACK_GUARD
+        .get()
+        .and_then(|m| m.lock().ok().and_then(|mut g| g.take()));
+    match guard {
+        Some(g) => Box::pin(stack::reflow_stream(A::namespace(), g).map(A::margin_changed)),
+        None => Box::pin(stream::pending()),
+    }
 }
 
 // Free functions with the exact signature iced_layershell::application expects,

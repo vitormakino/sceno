@@ -2954,6 +2954,8 @@ dependencies = [
 name = "overlay"
 version = "0.1.0"
 dependencies = [
+ "dbus",
+ "futures",
  "iced",
  "iced_layershell",
  "ksni",

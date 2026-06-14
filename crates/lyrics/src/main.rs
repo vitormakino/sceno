@@ -3,7 +3,7 @@ use futures::stream::BoxStream;
 use iced::widget::{container, text};
 use iced::{Color, Element, Subscription, Task};
 use iced_layershell::to_layer_message;
-use overlay::{FontSize, Position};
+use overlay::FontSize;
 use std::time::Instant;
 
 mod config;
@@ -101,7 +101,6 @@ struct LyricsTray {
     tx: mpsc::UnboundedSender<Message>,
     enabled: bool,
     font_size: FontSize,
-    position: Position,
 }
 
 impl ksni::Tray for LyricsTray {
@@ -113,7 +112,6 @@ impl ksni::Tray for LyricsTray {
     }
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
         use ksni::menu::*;
-        let pos = self.position;
         let fs = self.font_size;
         vec![
             CheckmarkItem {
@@ -127,39 +125,6 @@ impl ksni::Tray for LyricsTray {
             }
             .into(),
             MenuItem::Separator,
-            SubMenu {
-                label: "Posição".into(),
-                submenu: vec![
-                    RadioGroup {
-                        selected: pos.index(),
-                        select: Box::new(|this: &mut Self, idx| {
-                            this.position = match idx {
-                                0 => Position::Bottom,
-                                _ => Position::Top,
-                            };
-                            let _ = this
-                                .tx
-                                .unbounded_send(Message::AnchorChange(this.position.anchor()));
-                            let _ = this
-                                .tx
-                                .unbounded_send(Message::MarginChange(this.position.margin()));
-                        }),
-                        options: vec![
-                            RadioItem {
-                                label: "Baixo".into(),
-                                ..Default::default()
-                            },
-                            RadioItem {
-                                label: "Topo".into(),
-                                ..Default::default()
-                            },
-                        ],
-                    }
-                    .into(),
-                ],
-                ..Default::default()
-            }
-            .into(),
             SubMenu {
                 label: "Tamanho da fonte".into(),
                 submenu: vec![
@@ -212,6 +177,10 @@ impl overlay::OverlayApp for State {
 
     fn namespace() -> &'static str {
         APP
+    }
+
+    fn margin_changed(margin: (i32, i32, i32, i32)) -> Self::Message {
+        Message::MarginChange(margin)
     }
 
     fn update(&mut self, message: Self::Message) -> Task<Self::Message> {
@@ -329,7 +298,6 @@ fn event_stream() -> BoxStream<'static, Message> {
         tx: tx.clone(),
         enabled: cfg.enabled,
         font_size: FontSize::from_idx(cfg.font_size_idx),
-        position: Position::Bottom,
     })
     .spawn();
 

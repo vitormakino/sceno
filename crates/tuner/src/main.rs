@@ -57,6 +57,9 @@ impl overlay::OverlayApp for State {
     fn namespace() -> &'static str {
         "tuner"
     }
+    fn margin_changed(margin: (i32, i32, i32, i32)) -> Message {
+        Message::MarginChange(margin)
+    }
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::PitchUpdate(n) => self.note = n,
