@@ -9,12 +9,15 @@ mod config;
 mod meter;
 mod note;
 mod smooth;
+mod tray;
 use note::Note;
 
 #[to_layer_message]
 #[derive(Debug, Clone)]
 enum Message {
     PitchUpdate(Option<Note>),
+    SetEnabled(bool),
+    SetMeterStyle(meter::MeterStyle),
 }
 
 struct State {
@@ -36,14 +39,35 @@ impl Default for State {
     }
 }
 
+impl State {
+    fn persist(&self) {
+        overlay::save(
+            "tuner",
+            &config::TunerConfig {
+                meter_style_idx: self.style.index(),
+                enabled: self.enabled,
+            },
+        );
+    }
+}
+
 impl overlay::OverlayApp for State {
     type Message = Message;
     fn namespace() -> &'static str {
         "tuner"
     }
     fn update(&mut self, message: Message) -> Task<Message> {
-        if let Message::PitchUpdate(n) = message {
-            self.note = n;
+        match message {
+            Message::PitchUpdate(n) => self.note = n,
+            Message::SetEnabled(on) => {
+                self.enabled = on;
+                self.persist();
+            }
+            Message::SetMeterStyle(s) => {
+                self.style = s;
+                self.persist();
+            }
+            _ => {}
         }
         Task::none()
     }
@@ -97,13 +121,23 @@ impl overlay::OverlayApp for State {
         .into()
     }
     fn subscription(&self) -> Subscription<Message> {
-        Subscription::run(audio_stream)
+        Subscription::run(event_stream)
     }
 }
 
-fn audio_stream() -> BoxStream<'static, Message> {
+fn event_stream() -> BoxStream<'static, Message> {
     let (tx, rx) = mpsc::unbounded::<Message>();
+    let cfg: config::TunerConfig = overlay::load_config("tuner");
+
+    ksni::TrayService::new(tray::TunerTray {
+        tx: tx.clone(),
+        enabled: cfg.enabled,
+        style: meter::MeterStyle::from_idx(cfg.meter_style_idx),
+    })
+    .spawn();
+
     std::thread::spawn(move || audio::run(tx));
+
     Box::pin(rx)
 }
 
