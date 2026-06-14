@@ -27,11 +27,6 @@ pub fn frequency_to_note(freq: f64, a4: f64) -> Note {
     }
 }
 
-/// Map cents in [-50, 50] to a meter position in [0.0, 1.0] (0.5 = in tune).
-pub fn meter_position(cents: f64) -> f64 {
-    ((cents / 50.0).clamp(-1.0, 1.0) + 1.0) / 2.0
-}
-
 /// Whether the deviation is small enough to call "in tune".
 pub fn is_in_tune(cents: f64) -> bool {
     cents.abs() < 5.0
@@ -69,13 +64,6 @@ mod tests {
         let n = frequency_to_note(445.0, 440.0);
         assert_eq!(n.name, "A");
         assert!(n.cents > 0.0 && n.cents < 50.0, "cents {}", n.cents);
-    }
-    #[test]
-    fn meter_position_maps_range() {
-        assert!(approx(meter_position(0.0), 0.5, 1e-9));
-        assert!(approx(meter_position(50.0), 1.0, 1e-9));
-        assert!(approx(meter_position(-50.0), 0.0, 1e-9));
-        assert!(approx(meter_position(100.0), 1.0, 1e-9));
     }
     #[test]
     fn in_tune_threshold() {
