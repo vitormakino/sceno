@@ -1,12 +1,13 @@
 //! MPRIS (D-Bus) player tracking.
 //!
 //! Polls the active media player for now-playing metadata and position, fetches
-//! synced lyrics from LRCLIB on track changes, and feeds the existing timeline
-//! machinery via `Message::CuesReceived` / `Message::SyncReceived`.
+//! synced lyrics from LRCLIB on track changes, and delivers [`PlayerEvent`]s to a
+//! caller-supplied sink. Apps map these into their own message type.
 
-use crate::{Message, TimelineSync, lrc, lrclib};
-use futures::channel::mpsc::UnboundedSender;
-use lrclib::TrackQuery;
+use crate::cue::CueEntry;
+use crate::lrclib::TrackQuery;
+use crate::sync::TimelineSync;
+use crate::{lrc, lrclib};
 use mpris::{PlaybackStatus, PlayerFinder};
 use std::time::{Duration, Instant};
 
@@ -17,6 +18,19 @@ const IDLE_INTERVAL: Duration = Duration::from_secs(2);
 /// Times to re-attempt a lyrics fetch (one per poll) when a track first comes
 /// back empty — covers transient LRCLIB outages that outlast the HTTP retries.
 const FETCH_RETRIES: u32 = 3;
+
+/// Now-playing update delivered to the app. Carries the resolved `query` (so an
+/// app can do its own library lookup) alongside the LRCLIB `cues`.
+pub enum PlayerEvent {
+    /// A (possibly new) track: its query, any synced cues, and a position sample.
+    Track {
+        query: Option<TrackQuery>,
+        cues: Vec<CueEntry>,
+        sync: TimelineSync,
+    },
+    /// A position-only update for the current track.
+    Sync(TimelineSync),
+}
 
 /// Noise words that mark a bracketed segment of a title as decoration.
 const NOISE_WORDS: &[&str] = &[
@@ -191,10 +205,15 @@ fn debug(args: std::fmt::Arguments) {
 }
 
 /// Run the MPRIS polling loop forever (intended to own a dedicated thread).
-pub fn run(tx: UnboundedSender<Message>) {
+/// `sink` returns `false` to stop (its receiver was dropped on app exit).
+pub fn run(mut sink: impl FnMut(PlayerEvent) -> bool) {
     loop {
         match PlayerFinder::new() {
-            Ok(finder) => track_active_player(&finder, &tx),
+            Ok(finder) => {
+                if !track_active_player(&finder, &mut sink) {
+                    return;
+                }
+            }
             Err(e) => debug(format_args!("no D-Bus / PlayerFinder error: {e}")),
         }
         // Either no D-Bus or the player vanished — back off and retry.
@@ -202,9 +221,9 @@ pub fn run(tx: UnboundedSender<Message>) {
     }
 }
 
-/// Follow the active player until it disappears or errors, then return so the
-/// caller can re-discover.
-fn track_active_player(finder: &PlayerFinder, tx: &UnboundedSender<Message>) {
+/// Follow the active player until it disappears or errors, then return `true` so
+/// the caller can re-discover. Returns `false` if the sink asked to stop.
+fn track_active_player(finder: &PlayerFinder, sink: &mut impl FnMut(PlayerEvent) -> bool) -> bool {
     let mut current_key: Option<String> = None;
     let mut retries_left: u32 = 0;
 
@@ -213,7 +232,7 @@ fn track_active_player(finder: &PlayerFinder, tx: &UnboundedSender<Message>) {
             Ok(p) => p,
             Err(e) => {
                 debug(format_args!("no active player: {e}"));
-                return;
+                return true;
             }
         };
         let Ok(metadata) = player.get_metadata() else {
@@ -221,7 +240,7 @@ fn track_active_player(finder: &PlayerFinder, tx: &UnboundedSender<Message>) {
                 "metadata read failed for '{}'",
                 player.identity()
             ));
-            return;
+            return true;
         };
 
         let query = build_query(
@@ -261,7 +280,7 @@ fn track_active_player(finder: &PlayerFinder, tx: &UnboundedSender<Message>) {
         }
 
         // Fetch on a new track, or while retrying one that came back empty.
-        let send_result = if track_changed || retries_left > 0 {
+        let event = if track_changed || retries_left > 0 {
             let cues = fetch_cues(&query);
             if !cues.is_empty() {
                 retries_left = 0;
@@ -271,22 +290,22 @@ fn track_active_player(finder: &PlayerFinder, tx: &UnboundedSender<Message>) {
                     query,
                     cues.len()
                 ));
-                tx.unbounded_send(Message::CuesReceived(cues, sync))
+                PlayerEvent::Track { query, cues, sync }
             } else if track_changed {
                 // First miss — keep the empty timeline but schedule retries.
                 debug(format_args!("query={:?} -> no lyrics (will retry)", query));
-                tx.unbounded_send(Message::CuesReceived(cues, sync))
+                PlayerEvent::Track { query, cues, sync }
             } else {
                 retries_left -= 1;
                 debug(format_args!("retry: still no lyrics ({retries_left} left)"));
-                tx.unbounded_send(Message::SyncReceived(sync))
+                PlayerEvent::Sync(sync)
             }
         } else {
-            tx.unbounded_send(Message::SyncReceived(sync))
+            PlayerEvent::Sync(sync)
         };
 
-        if send_result.is_err() {
-            return; // app shutting down
+        if !sink(event) {
+            return false; // app shutting down
         }
 
         std::thread::sleep(POLL_INTERVAL);
@@ -294,7 +313,7 @@ fn track_active_player(finder: &PlayerFinder, tx: &UnboundedSender<Message>) {
 }
 
 /// Fetch and parse synced lyrics for a query, or an empty list on miss/failure.
-fn fetch_cues(query: &Option<TrackQuery>) -> Vec<crate::CueEntry> {
+fn fetch_cues(query: &Option<TrackQuery>) -> Vec<CueEntry> {
     query
         .as_ref()
         .and_then(lrclib::fetch_synced)

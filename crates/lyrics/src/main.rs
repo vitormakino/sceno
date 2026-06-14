@@ -3,53 +3,16 @@ use futures::stream::BoxStream;
 use iced::widget::{container, text};
 use iced::{Color, Element, Subscription, Task};
 use iced_layershell::to_layer_message;
+use media::player::{self, PlayerEvent};
+use media::{CueEntry, TimelineSync, cue_at};
 use overlay::FontSize;
-use std::time::Instant;
 
 mod config;
-mod lrc;
-mod lrclib;
-mod player;
 use config::SavedConfig;
 
 /// App name: used for the Wayland namespace, the single-instance lock, and the
 /// config/cache directory (`~/.config/sceno/lyrics`, `~/.cache/sceno/lyrics`).
 const APP: &str = "lyrics";
-
-// ── Timeline types ────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone)]
-struct CueEntry {
-    start: f64,
-    end: f64,
-    text: String,
-}
-
-/// Reference point that lets us extrapolate the current playback position
-/// between sync samples from the player.
-#[derive(Debug, Clone)]
-struct TimelineSync {
-    video_time: f64,
-    captured_at: Instant,
-    paused: bool,
-    playback_rate: f64,
-}
-
-impl TimelineSync {
-    fn current_time(&self) -> f64 {
-        if self.paused {
-            self.video_time
-        } else {
-            self.video_time + self.captured_at.elapsed().as_secs_f64() * self.playback_rate
-        }
-    }
-}
-
-fn cue_at(cues: &[CueEntry], t: f64) -> Option<&str> {
-    cues.iter()
-        .find(|c| c.start <= t && t < c.end)
-        .map(|c| c.text.as_str())
-}
 
 // ── App types ─────────────────────────────────────────────────────────────────
 
@@ -301,7 +264,14 @@ fn event_stream() -> BoxStream<'static, Message> {
     })
     .spawn();
 
-    std::thread::spawn(move || player::run(tx));
+    std::thread::spawn(move || {
+        player::run(|ev| match ev {
+            PlayerEvent::Track { cues, sync, .. } => {
+                tx.unbounded_send(Message::CuesReceived(cues, sync)).is_ok()
+            }
+            PlayerEvent::Sync(sync) => tx.unbounded_send(Message::SyncReceived(sync)).is_ok(),
+        })
+    });
 
     Box::pin(rx)
 }
@@ -324,7 +294,7 @@ fn timeline_tick_stream() -> BoxStream<'static, Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{Duration, Instant};
+    use std::time::Instant;
 
     fn test_state() -> State {
         State {
@@ -364,75 +334,6 @@ mod tests {
                 text: "foo".into(),
             },
         ]
-    }
-
-    // ── cue_at ────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn cue_at_returns_active_cue() {
-        let cues = sample_cues();
-        assert_eq!(cue_at(&cues, 1.0), Some("hello"));
-        assert_eq!(cue_at(&cues, 2.9), Some("hello"));
-        assert_eq!(cue_at(&cues, 3.0), Some("world")); // start é inclusivo
-        assert_eq!(cue_at(&cues, 4.5), Some("world"));
-        assert_eq!(cue_at(&cues, 6.0), Some("foo"));
-    }
-
-    #[test]
-    fn cue_at_none_outside_cues() {
-        let cues = vec![
-            CueEntry {
-                start: 1.0,
-                end: 2.0,
-                text: "a".into(),
-            },
-            CueEntry {
-                start: 3.0,
-                end: 4.0,
-                text: "b".into(),
-            },
-        ];
-        assert_eq!(cue_at(&cues, 0.5), None);
-        assert_eq!(cue_at(&cues, 2.0), None); // end é exclusivo
-        assert_eq!(cue_at(&cues, 2.5), None); // gap entre cues
-        assert_eq!(cue_at(&cues, 4.0), None);
-    }
-
-    #[test]
-    fn cue_at_empty_list() {
-        assert_eq!(cue_at(&[], 1.0), None);
-    }
-
-    // ── TimelineSync::current_time ────────────────────────────────────────────
-
-    #[test]
-    fn current_time_fixed_when_paused() {
-        let sync = paused_sync(42.5);
-        assert_eq!(sync.current_time(), 42.5);
-    }
-
-    #[test]
-    fn current_time_advances_when_playing() {
-        let sync = TimelineSync {
-            video_time: 10.0,
-            captured_at: Instant::now() - Duration::from_secs(2),
-            paused: false,
-            playback_rate: 1.0,
-        };
-        let t = sync.current_time();
-        assert!((12.0..12.1).contains(&t), "expected ~12.0, got {t}");
-    }
-
-    #[test]
-    fn current_time_respects_playback_rate() {
-        let sync = TimelineSync {
-            video_time: 0.0,
-            captured_at: Instant::now() - Duration::from_secs(2),
-            paused: false,
-            playback_rate: 2.0,
-        };
-        let t = sync.current_time();
-        assert!((4.0..4.1).contains(&t), "2× speed: expected ~4.0, got {t}");
     }
 
     // ── apply_timeline_caption ────────────────────────────────────────────────

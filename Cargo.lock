@@ -2241,12 +2241,10 @@ dependencies = [
  "iced",
  "iced_layershell",
  "ksni",
- "libc",
- "mpris",
+ "media",
  "overlay",
  "serde",
  "serde_json",
- "ureq",
 ]
 
 [[package]]
@@ -2289,6 +2287,17 @@ dependencies = [
  "proc-macro-utils",
  "proc-macro2",
  "quote",
+]
+
+[[package]]
+name = "media"
+version = "0.1.0"
+dependencies = [
+ "mpris",
+ "overlay",
+ "serde",
+ "serde_json",
+ "ureq",
 ]
 
 [[package]]

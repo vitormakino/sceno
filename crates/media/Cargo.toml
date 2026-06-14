@@ -1,6 +1,6 @@
 [package]
-name = "lyrics"
-description = "Synced lyrics overlay driven by MPRIS + LRCLIB."
+name = "media"
+description = "Now-playing tracking (MPRIS) + lyrics sources (LRCLIB, UltraStar) shared by sceno apps."
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -9,10 +9,7 @@ repository.workspace = true
 
 [dependencies]
 overlay = { path = "../overlay" }
-media = { path = "../media" }
-iced.workspace = true
-iced_layershell.workspace = true
-futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-ksni.workspace = true
+mpris.workspace = true
+ureq.workspace = true

@@ -1,4 +1,4 @@
-//! Parsing of LRC synced-lyrics strings into the app's `CueEntry` timeline.
+//! Parsing of LRC synced-lyrics strings into the source-agnostic `CueEntry` timeline.
 //!
 //! Supports standard `[mm:ss.xx]` timestamps, multiple timestamps per line
 //! (`[00:12][00:50]repeated line`) and enhanced word-level tags (`<00:12.3>`),
@@ -6,7 +6,7 @@
 //! ignored. Blank lyric lines are kept as empty-text cues so the overlay clears
 //! during instrumental breaks.
 
-use crate::CueEntry;
+use crate::cue::CueEntry;
 
 /// How long the final cue stays on screen (no following line to bound it).
 const LAST_CUE_SECS: f64 = 5.0;
