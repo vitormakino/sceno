@@ -7,18 +7,40 @@ Guidance for working in the **sceno** repo. See `README.md` for user-facing docs
 
 A Cargo workspace (`members = ["crates/*"]`, edition 2024) of minimal Wayland
 **layer-shell** overlay apps. Each app is its own small binary; they are *not* a plugin
-system. Shared base crate + two apps:
+system. Two shared library crates + three app binaries:
 
-- **`overlay`** — the shared shell. The `OverlayApp` trait (`namespace`, `update`, `view`,
-  `subscription`) + `overlay::run::<A>()` wires an app into `iced_layershell`. Also home to
-  generic config I/O (`load_config::<T>`/`save`), XDG paths (`config_dir`/`cache_dir`),
-  `ensure_single_instance`, and `SCENO_DEBUG` tracing (`overlay::debug(tag, args)`).
-- **`lyrics`** — synced lyrics via MPRIS (D-Bus) + LRCLIB. Owns its `SavedConfig`.
-- **`tuner`** — vocal tuner: mic (cpal/ALSA) → pitch detection → note + tuning meter.
+- **`overlay`** (lib) — the shared shell. The `OverlayApp` trait (`namespace`, `update`,
+  `view`, `subscription`, + default-implemented surface geometry: `surface_height`, `anchor`,
+  `events_transparent`, `stacks`, `initial_margin`) + `overlay::run::<A>()` wires an app into
+  `iced_layershell`. Also home to generic config I/O (`load_config::<T>`/`save`), XDG paths
+  (`config_dir`/`cache_dir`/`songs_dir`), `ensure_single_instance`, event-driven auto-stacking,
+  and `SCENO_DEBUG` tracing (`overlay::debug(tag, args)`).
+- **`pitch`** (lib) — mic capture + pitch math: `note` (`frequency_to_note`,
+  `note_to_frequency`, `is_in_tune`, `Note` with a `midi` field), `smooth` (`Smoother`),
+  `detect_frequency` (McLeod/MPM), `capture::run_capture` (cpal stream + 50 ms loop, calls a
+  `sink(Option<Note>) -> bool` that returns `false` to stop), and `cents_color` (→ `[f32;3]`).
+  Used by `tuner` and `karaoke`.
+- **`media`** (lib) — now-playing + lyrics sources: `player` (MPRIS loop delivering a neutral
+  `PlayerEvent` to a `sink(PlayerEvent) -> bool`), `sync::TimelineSync`, `cue` (`CueEntry` +
+  `cue_at`), `lrc`/`lrclib` (LRCLIB fetch + cache + library persist), `ultrastar` (`.txt`
+  parser), and `library` (scan a folder, match by normalized artist/title). Used by `lyrics`
+  and `karaoke`.
+- **`lyrics`** (bin) — synced caption overlay via `media` (MPRIS + LRCLIB). Owns its `SavedConfig`.
+- **`tuner`** (bin) — vocal tuner via `pitch`: mic → note + tuning meter.
+- **`karaoke`** (bin) — UltraStar karaoke: matches the playing track to a local `.txt` in the
+  song library and renders a scrolling Canvas pitch-lane (`lane.rs`), plus a live mic cursor
+  (own `pitch::run_capture` stream) colored green when the sung pitch matches the target note
+  (octave-folded). A tall, fixed panel: overrides `surface_height()=220` and `stacks()=false`
+  so it owns its geometry instead of joining the thin-strip stacking. UltraStar `#GAP`/`#BPM`
+  are calibrated to a specific recording, so a `KaraokeConfig.offset_ms` tray nudge corrects
+  drift against arbitrary playback. `#RELATIVE` files are unsupported.
+
+The shared song library lives at `~/.local/share/sceno/songs` (`overlay::songs_dir`); `lyrics`
+also persists LRCLIB hits there as `Artist - Title.lrc` so they aren't re-downloaded.
 
 Stack: `iced` 0.14 under `iced_layershell` 0.18 (wgpu), `ksni` tray, `serde`,
-`pitch-detection` (McLeod/MPM), `cpal`. `#[to_layer_message]` injects extra `Message`
-variants, so `update` match blocks need a `_ => {}` arm.
+`pitch-detection` (McLeod/MPM), `cpal`, `mpris`, `ureq`. `#[to_layer_message]` injects extra
+`Message` variants, so `update` match blocks need a `_ => {}` arm.
 
 ## Tuner meter styles
 
@@ -35,8 +57,8 @@ The tuner display is a translucent dark "pill" showing the note name + signed ce
   Strobe`; the tick is a thread+mpsc `BoxStream` (the lyrics `TimelineTick` pattern), *not*
   `iced::time::every` (which conflicts with the layer-shell executor).
 
-Color feedback (`meter::cents_color`): green `[0.30,0.90,0.30]` within ±5¢ → amber
-`[0.95,0.75,0.20]` by ±25¢ → red `[0.90,0.25,0.25]` by ±50¢ (symmetric, clamped).
+Color feedback (`pitch::cents_color`, shared with karaoke): green `[0.30,0.90,0.30]` within
+±5¢ → amber `[0.95,0.75,0.20]` by ±25¢ → red `[0.90,0.25,0.25]` by ±50¢ (symmetric, clamped).
 
 Anti-jitter smoothing (`crates/tuner/src/smooth.rs`, `Smoother`): EMA on frequency
 (`ALPHA = 0.25`) + a "hold" of `HOLD_FRAMES = 6` `None` frames (~300 ms) before dropping,
