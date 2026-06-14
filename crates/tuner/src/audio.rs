@@ -48,6 +48,15 @@ mod capture_impl {
         let channels = cfg.channels() as usize;
         let sample_format = cfg.sample_format();
 
+        // Opt-in stderr tracing (`SCENO_DEBUG=1`): chosen device + detected notes.
+        overlay::debug(
+            "tuner",
+            format_args!(
+                "input: {} @ {sample_rate} Hz, {channels} ch, {sample_format:?}",
+                device.name().unwrap_or_else(|_| "?".into())
+            ),
+        );
+
         let buf: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::with_capacity(WINDOW)));
         let cb_buf = buf.clone();
 
@@ -133,6 +142,12 @@ mod capture_impl {
                 .then(|| super::detect_frequency(&window, sample_rate, MIN_CLARITY))
                 .flatten()
                 .map(|f| crate::note::frequency_to_note(f, A4));
+            if let Some(n) = &note {
+                overlay::debug(
+                    "tuner",
+                    format_args!("{}{} {:+.0} cents", n.name, n.octave, n.cents),
+                );
+            }
             if tx.unbounded_send(Message::PitchUpdate(note)).is_err() {
                 break;
             }

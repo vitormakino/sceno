@@ -185,10 +185,9 @@ fn find_ci(haystack: &str, needle: &str) -> Option<usize> {
 }
 
 /// Lightweight stderr tracing, enabled with `SCENO_DEBUG=1`.
+/// Thin wrapper over [`overlay::debug`] that fixes the `player` tag.
 fn debug(args: std::fmt::Arguments) {
-    if std::env::var_os("SCENO_DEBUG").is_some() {
-        eprintln!("[player] {args}");
-    }
+    overlay::debug("player", args);
 }
 
 /// Run the MPRIS polling loop forever (intended to own a dedicated thread).
