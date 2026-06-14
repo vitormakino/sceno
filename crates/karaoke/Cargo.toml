@@ -1,0 +1,20 @@
+[package]
+name = "karaoke"
+description = "UltraStar karaoke overlay: a scrolling pitch-lane synced to MPRIS playback."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+overlay = { path = "../overlay" }
+media = { path = "../media" }
+iced = { workspace = true, features = ["canvas"] }
+iced_layershell.workspace = true
+futures.workspace = true
+serde.workspace = true
+ksni.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

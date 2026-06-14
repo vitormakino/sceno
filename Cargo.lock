@@ -2002,6 +2002,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "karaoke"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "iced",
+ "iced_layershell",
+ "ksni",
+ "media",
+ "overlay",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "keyboard-types"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
