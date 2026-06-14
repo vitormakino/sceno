@@ -135,12 +135,16 @@ mod capture_impl {
             return;
         }
 
+        let mut smoother = crate::smooth::Smoother::default();
+
         loop {
             std::thread::sleep(std::time::Duration::from_millis(50));
             let window: Vec<f32> = { buf.lock().unwrap().clone() };
-            let note = (window.len() >= WINDOW)
+            let raw = (window.len() >= WINDOW)
                 .then(|| super::detect_frequency(&window, sample_rate, MIN_CLARITY))
-                .flatten()
+                .flatten();
+            let note = smoother
+                .update(raw)
                 .map(|f| crate::note::frequency_to_note(f, A4));
             if let Some(n) = &note {
                 overlay::debug(
