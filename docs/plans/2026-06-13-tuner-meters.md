@@ -1082,7 +1082,7 @@ cargo +stable build --release 2>&1 | tail -3
 ls target/release/lyrics target/release/tuner
 ```
 
-Expected: `fmt-exit=0`; clippy no warnings; all `test result:` lines `0 failed` (overlay 7, lyrics 54, tuner 19 = 8 prior + 4 smooth + 5 meter + 2 config); both release binaries present.
+Expected: `fmt-exit=0`; clippy no warnings; all `test result:` lines `0 failed` (overlay 7, lyrics 54, tuner 18 = 7 prior [`meter_position` test dropped with the unused fn in the canvas rewrite] + 4 smooth + 5 meter + 2 config); both release binaries present.
 
 If `cargo +stable fmt --all --check` reports diffs, run `cargo +stable fmt --all`, re-verify, and commit as `style: rustfmt`.
 
