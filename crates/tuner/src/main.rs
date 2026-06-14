@@ -5,6 +5,7 @@ use iced::{Color, Element, Subscription, Task};
 use iced_layershell::to_layer_message;
 
 mod audio;
+mod meter;
 mod note;
 mod smooth;
 use note::Note;
