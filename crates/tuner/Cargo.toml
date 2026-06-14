@@ -14,3 +14,7 @@ iced_layershell.workspace = true
 futures.workspace = true
 pitch-detection = "0.3"
 cpal = "0.15"
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
