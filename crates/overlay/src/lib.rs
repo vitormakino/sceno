@@ -4,7 +4,7 @@ mod paths;
 mod settings;
 mod stack;
 mod trace;
-pub use paths::{cache_dir, config_dir};
+pub use paths::{cache_dir, config_dir, songs_dir};
 pub use settings::{FontSize, load_config, save};
 pub use stack::{Margin, margin_for_slot};
 pub use trace::{debug, debug_enabled};

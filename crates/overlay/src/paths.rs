@@ -35,6 +35,15 @@ pub fn cache_dir(app: &str) -> Option<PathBuf> {
     resolve(xdg.as_deref(), home.as_deref(), ".cache", app)
 }
 
+/// Shared song library: `$XDG_DATA_HOME/sceno/songs` (fallback
+/// `~/.local/share/sceno/songs`). User-curated `.txt`/`.lrc` files live here, so
+/// it is data (not cache) and shared across apps rather than scoped per-app.
+pub fn songs_dir() -> Option<PathBuf> {
+    let xdg = std::env::var("XDG_DATA_HOME").ok();
+    let home = std::env::var("HOME").ok();
+    resolve(xdg.as_deref(), home.as_deref(), ".local/share", "songs")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -60,6 +69,14 @@ mod tests {
     #[test]
     fn no_home_no_xdg_is_none() {
         assert!(resolve(None, None, ".config", "lyrics").is_none());
+    }
+
+    #[test]
+    fn songs_dir_uses_data_home_layout() {
+        let p = resolve(Some("/run/data"), Some("/home/u"), ".local/share", "songs").unwrap();
+        assert_eq!(p, PathBuf::from("/run/data/sceno/songs"));
+        let p = resolve(None, Some("/home/u"), ".local/share", "songs").unwrap();
+        assert_eq!(p, PathBuf::from("/home/u/.local/share/sceno/songs"));
     }
 
     #[test]

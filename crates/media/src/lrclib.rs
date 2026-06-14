@@ -69,6 +69,7 @@ pub fn fetch_synced(q: &TrackQuery) -> Option<String> {
     let lrc = network_fetch(q);
     if let Some(s) = &lrc {
         cache_write(q, s);
+        persist_to_library(q, s);
     }
     lrc
 }
@@ -187,6 +188,50 @@ fn cache_write(q: &TrackQuery, contents: &str) {
     let _ = std::fs::write(path, contents);
 }
 
+// ── Local song library ──────────────────────────────────────────────────────
+
+/// `Artist - Title.lrc` (sanitized) — the filename convention the library reads.
+fn library_filename(q: &TrackQuery) -> String {
+    let sanitize = |s: &str| {
+        s.chars()
+            .map(|c| {
+                if matches!(c, '/' | '\\' | ':') {
+                    '-'
+                } else {
+                    c
+                }
+            })
+            .collect::<String>()
+            .trim()
+            .to_string()
+    };
+    let artist = sanitize(&q.artist);
+    let title = sanitize(&q.title);
+    if artist.is_empty() {
+        format!("{title}.lrc")
+    } else {
+        format!("{artist} - {title}.lrc")
+    }
+}
+
+/// Save a freshly-fetched LRC into the shared song library so it is reused
+/// without re-downloading (and is matchable by the UltraStar/lyrics library).
+/// Never overwrites an existing file (e.g. a curated UltraStar `.txt` companion).
+fn persist_to_library(q: &TrackQuery, contents: &str) {
+    if cfg!(test) {
+        return;
+    }
+    let Some(dir) = overlay::songs_dir() else {
+        return;
+    };
+    let path = dir.join(library_filename(q));
+    if path.exists() {
+        return;
+    }
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(path, contents);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,6 +346,25 @@ mod tests {
             ..Default::default()
         }];
         assert!(best_match(tracks, Some(257)).is_none());
+    }
+
+    #[test]
+    fn library_filename_is_artist_dash_title() {
+        assert_eq!(library_filename(&q()), "Fleetwood Mac - Dreams.lrc");
+        let no_artist = TrackQuery {
+            artist: "".into(),
+            title: "Solo".into(),
+            album: None,
+            duration: None,
+        };
+        assert_eq!(library_filename(&no_artist), "Solo.lrc");
+        let slashed = TrackQuery {
+            artist: "AC/DC".into(),
+            title: "T.N.T".into(),
+            album: None,
+            duration: None,
+        };
+        assert_eq!(library_filename(&slashed), "AC-DC - T.N.T.lrc");
     }
 
     #[test]
