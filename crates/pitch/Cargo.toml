@@ -1,0 +1,13 @@
+[package]
+name = "pitch"
+description = "Microphone pitch detection + note math shared by the sceno overlay apps."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+overlay = { path = "../overlay" }
+pitch-detection = "0.3"
+cpal = "0.15"

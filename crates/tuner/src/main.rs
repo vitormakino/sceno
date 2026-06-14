@@ -7,10 +7,8 @@ use iced_layershell::to_layer_message;
 mod audio;
 mod config;
 mod meter;
-mod note;
-mod smooth;
 mod tray;
-use note::Note;
+use pitch::Note;
 
 #[to_layer_message]
 #[derive(Debug, Clone)]
@@ -95,7 +93,7 @@ impl overlay::OverlayApp for State {
             return empty().into();
         };
         let color = meter::cents_color(n.cents);
-        let cents_label = if note::is_in_tune(n.cents) {
+        let cents_label = if pitch::is_in_tune(n.cents) {
             "IN TUNE".to_string()
         } else {
             format!("{:+.0}¢", n.cents)

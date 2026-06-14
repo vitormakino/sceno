@@ -9,11 +9,10 @@ repository.workspace = true
 
 [dependencies]
 overlay = { path = "../overlay" }
+pitch = { path = "../pitch" }
 iced = { workspace = true, features = ["canvas"] }
 iced_layershell.workspace = true
 futures.workspace = true
-pitch-detection = "0.3"
-cpal = "0.15"
 serde.workspace = true
 ksni.workspace = true
 

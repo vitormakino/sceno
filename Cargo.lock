@@ -3058,6 +3058,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pitch"
+version = "0.1.0"
+dependencies = [
+ "cpal",
+ "overlay",
+ "pitch-detection",
+]
+
+[[package]]
 name = "pitch-detection"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4059,13 +4068,12 @@ dependencies = [
 name = "tuner"
 version = "0.1.0"
 dependencies = [
- "cpal",
  "futures",
  "iced",
  "iced_layershell",
  "ksni",
  "overlay",
- "pitch-detection",
+ "pitch",
  "serde",
  "serde_json",
 ]
