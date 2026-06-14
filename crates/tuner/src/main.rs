@@ -6,6 +6,7 @@ use iced_layershell::to_layer_message;
 
 mod audio;
 mod note;
+mod smooth;
 use note::Note;
 
 #[to_layer_message]
