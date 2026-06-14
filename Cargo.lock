@@ -2011,6 +2011,7 @@ dependencies = [
  "ksni",
  "media",
  "overlay",
+ "pitch",
  "serde",
  "serde_json",
 ]

@@ -27,6 +27,8 @@ enum Message {
     TrackChanged(Option<TrackQuery>, TimelineSync),
     /// Position-only update for the current track.
     SyncUpdate(TimelineSync),
+    /// Latest detected pitch from the microphone.
+    PitchUpdate(Option<pitch::Note>),
     /// Render tick to advance the scroll while playing.
     Tick,
 }
@@ -41,6 +43,8 @@ struct State {
     range: (f64, f64),
     timeline_sync: Option<TimelineSync>,
     paused: bool,
+    /// Latest mic pitch (Phase 2 feedback cursor).
+    current_note: Option<pitch::Note>,
 }
 
 impl Default for State {
@@ -58,6 +62,7 @@ impl Default for State {
             range: (60.0, 72.0),
             timeline_sync: None,
             paused: false,
+            current_note: None,
         }
     }
 }
@@ -95,6 +100,18 @@ fn midi_range(song: &UltraStarSong) -> (f64, f64) {
     } else {
         (60.0, 72.0)
     }
+}
+
+/// Shift `v` by whole octaves until it lands within a semitone-tritone of
+/// `target`, so octave-off singing still reads as on-pitch (forgiving feedback).
+fn octave_fold(mut v: f64, target: f64) -> f64 {
+    while v - target > 6.0 {
+        v -= 12.0;
+    }
+    while target - v > 6.0 {
+        v += 12.0;
+    }
+    v
 }
 
 /// The syllables of the phrase active at time `t`, joined (UltraStar syllables
@@ -187,6 +204,7 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
             state.paused = sync.paused;
             state.timeline_sync = Some(sync);
         }
+        Message::PitchUpdate(n) => state.current_note = n,
         Message::Tick => {}
         _ => {}
     }
@@ -220,13 +238,35 @@ fn view(state: &State) -> Element<'_, Message> {
         })
         .collect();
 
+    // Sung-pitch cursor: fold octave-off singing toward the active target so it
+    // reads on-pitch, and color it by cents distance (green = in tune).
+    let active_target = song
+        .notes
+        .iter()
+        .find(|n| n.start <= t && t < n.end)
+        .map(|n| n.midi);
+    let (sung, cursor_color) = match state.current_note {
+        Some(note) => match active_target {
+            Some(tgt) => {
+                let folded = octave_fold(note.midi, tgt);
+                let [r, g, b] = pitch::cents_color((folded - tgt) * 100.0);
+                (Some(folded), Color::from_rgb(r, g, b))
+            }
+            None => (
+                Some(octave_fold(note.midi, (lo + hi) / 2.0)),
+                Color::from_rgba(0.85, 0.85, 0.85, 0.9),
+            ),
+        },
+        None => (None, Color::WHITE),
+    };
+
     let lane = canvas(Lane {
         bars,
         t,
         lo,
         hi,
-        sung: None,
-        cursor_color: Color::from_rgb(0.30, 0.90, 0.30),
+        sung,
+        cursor_color,
     })
     .width(iced::Fill)
     .height(iced::Length::Fixed(150.0));
@@ -268,13 +308,19 @@ fn event_stream() -> BoxStream<'static, Message> {
     })
     .spawn();
 
+    let player_tx = tx.clone();
     std::thread::spawn(move || {
         player::run(|ev| match ev {
-            PlayerEvent::Track { query, sync, .. } => tx
+            PlayerEvent::Track { query, sync, .. } => player_tx
                 .unbounded_send(Message::TrackChanged(query, sync))
                 .is_ok(),
-            PlayerEvent::Sync(sync) => tx.unbounded_send(Message::SyncUpdate(sync)).is_ok(),
+            PlayerEvent::Sync(sync) => player_tx.unbounded_send(Message::SyncUpdate(sync)).is_ok(),
         })
+    });
+
+    // Own microphone stream (no IPC with the tuner process), always-on like tuner.
+    std::thread::spawn(move || {
+        pitch::run_capture(|note| tx.unbounded_send(Message::PitchUpdate(note)).is_ok());
     });
 
     Box::pin(rx)
@@ -313,6 +359,16 @@ mod tests {
         let (lo, hi) = midi_range(&song());
         // pitches 0 and 12 -> midi 60 and 72, padded by 2.
         assert_eq!((lo, hi), (58.0, 74.0));
+    }
+
+    #[test]
+    fn octave_fold_brings_octave_off_pitch_close() {
+        // Singing C5 (72) against a C4 (60) target folds to 60.
+        assert_eq!(octave_fold(72.0, 60.0), 60.0);
+        // C3 (48) against C4 folds up to 60.
+        assert_eq!(octave_fold(48.0, 60.0), 60.0);
+        // Already close: unchanged.
+        assert_eq!(octave_fold(62.0, 60.0), 62.0);
     }
 
     #[test]

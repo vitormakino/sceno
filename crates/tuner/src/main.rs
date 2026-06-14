@@ -92,7 +92,8 @@ impl overlay::OverlayApp for State {
         let Some(n) = &self.note else {
             return empty().into();
         };
-        let color = meter::cents_color(n.cents);
+        let [r, g, b] = pitch::cents_color(n.cents);
+        let color = Color::from_rgb(r, g, b);
         let cents_label = if pitch::is_in_tune(n.cents) {
             "IN TUNE".to_string()
         } else {

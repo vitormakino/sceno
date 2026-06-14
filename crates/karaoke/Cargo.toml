@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 overlay = { path = "../overlay" }
 media = { path = "../media" }
+pitch = { path = "../pitch" }
 iced = { workspace = true, features = ["canvas"] }
 iced_layershell.workspace = true
 futures.workspace = true
