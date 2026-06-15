@@ -39,6 +39,14 @@ pub fn note_to_frequency(midi: f64, a4: f64) -> f64 {
     a4 * 2f64.powf((midi - 69.0) / 12.0)
 }
 
+/// Name + octave of a MIDI note number (60 = C4), e.g. `67 -> ("G", 4)`.
+pub fn midi_name(midi: i64) -> (&'static str, i32) {
+    (
+        NAMES[midi.rem_euclid(12) as usize],
+        (midi.div_euclid(12) - 1) as i32,
+    )
+}
+
 /// Whether the deviation is small enough to call "in tune".
 pub fn is_in_tune(cents: f64) -> bool {
     cents.abs() < 5.0
@@ -84,6 +92,13 @@ mod tests {
         assert!(is_in_tune(3.0));
         assert!(is_in_tune(-4.9));
         assert!(!is_in_tune(10.0));
+    }
+    #[test]
+    fn midi_name_maps_numbers() {
+        assert_eq!(midi_name(60), ("C", 4));
+        assert_eq!(midi_name(69), ("A", 4));
+        assert_eq!(midi_name(67), ("G", 4));
+        assert_eq!(midi_name(57), ("A", 3));
     }
     #[test]
     fn note_to_frequency_inverts() {

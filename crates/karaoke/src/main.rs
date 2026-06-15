@@ -114,6 +114,13 @@ fn octave_fold(mut v: f64, target: f64) -> f64 {
     v
 }
 
+/// Signed cents of the (octave-folded, continuous) sung pitch from `target`.
+/// `sung_pitch` is a continuous MIDI value (`note.midi + note.cents/100`), so the
+/// feedback keeps fractional precision instead of snapping to whole semitones.
+fn cents_to_target(sung_pitch: f64, target: f64) -> f64 {
+    (octave_fold(sung_pitch, target) - target) * 100.0
+}
+
 /// The syllables of the phrase active at time `t`, joined (UltraStar syllables
 /// carry their own spacing, so concatenation reproduces the words).
 fn current_line(song: &UltraStarSong, t: f64) -> String {
@@ -230,35 +237,66 @@ fn view(state: &State) -> Element<'_, Message> {
         .notes
         .iter()
         .filter(|n| n.end >= win_start && n.start <= win_end)
-        .map(|n| Bar {
-            start: n.start,
-            end: n.end,
-            midi: n.midi,
-            golden: n.golden,
+        .map(|n| {
+            let (name, octave) = pitch::midi_name(n.midi as i64);
+            Bar {
+                start: n.start,
+                end: n.end,
+                midi: n.midi,
+                golden: n.golden,
+                name,
+                octave,
+            }
         })
         .collect();
 
-    // Sung-pitch cursor: fold octave-off singing toward the active target so it
-    // reads on-pitch, and color it by cents distance (green = in tune).
+    // The note you're meant to sing right now (the bar under the playhead).
     let active_target = song
         .notes
         .iter()
         .find(|n| n.start <= t && t < n.end)
         .map(|n| n.midi);
-    let (sung, cursor_color) = match state.current_note {
-        Some(note) => match active_target {
-            Some(tgt) => {
-                let folded = octave_fold(note.midi, tgt);
-                let [r, g, b] = pitch::cents_color((folded - tgt) * 100.0);
-                (Some(folded), Color::from_rgb(r, g, b))
-            }
-            None => (
-                Some(octave_fold(note.midi, (lo + hi) / 2.0)),
-                Color::from_rgba(0.85, 0.85, 0.85, 0.9),
-            ),
-        },
-        None => (None, Color::WHITE),
+
+    // Your sung pitch as a *continuous* MIDI value, so feedback keeps cents
+    // precision (the old code used the rounded note.midi, quantizing to semitones).
+    let sung_pitch = state.current_note.map(|n| n.midi + n.cents / 100.0);
+    let (sung, cursor_color) = match (sung_pitch, active_target) {
+        (Some(p), Some(tgt)) => {
+            let [r, g, b] = pitch::cents_color(cents_to_target(p, tgt));
+            (Some(octave_fold(p, tgt)), Color::from_rgb(r, g, b))
+        }
+        (Some(p), None) => (
+            Some(octave_fold(p, (lo + hi) / 2.0)),
+            Color::from_rgba(0.85, 0.85, 0.85, 0.9),
+        ),
+        (None, _) => (None, Color::from_rgba(1.0, 1.0, 1.0, 0.6)),
     };
+
+    // Readout: the target note to sing, and the note you're singing (colored
+    // green when you match the target). Works even between notes, so it doubles
+    // as a mic check.
+    let target_label = match active_target {
+        Some(m) => {
+            let (n, o) = pitch::midi_name(m as i64);
+            format!("Cante: {n}{o}")
+        }
+        None => "Cante: —".to_string(),
+    };
+    let (you_label, you_color) = match state.current_note {
+        Some(note) => (
+            format!("Você: {}{} {:+.0}¢", note.name, note.octave, note.cents),
+            cursor_color,
+        ),
+        None => (
+            "Você: — (microfone?)".to_string(),
+            Color::from_rgba(1.0, 1.0, 1.0, 0.6),
+        ),
+    };
+    let readout = iced::widget::row![
+        text(target_label).size(18.0).color(Color::WHITE),
+        text(you_label).size(18.0).color(you_color),
+    ]
+    .spacing(28);
 
     let lane = canvas(Lane {
         bars,
@@ -269,14 +307,15 @@ fn view(state: &State) -> Element<'_, Message> {
         cursor_color,
     })
     .width(iced::Fill)
-    .height(iced::Length::Fixed(150.0));
+    .height(iced::Length::Fixed(120.0));
 
     let body = column![
+        readout,
         lane,
-        text(current_line(song, t)).size(26.0).color(Color::WHITE),
+        text(current_line(song, t)).size(22.0).color(Color::WHITE),
     ]
     .align_x(iced::Center)
-    .spacing(6);
+    .spacing(4);
 
     container(
         container(body)
@@ -359,6 +398,18 @@ mod tests {
         let (lo, hi) = midi_range(&song());
         // pitches 0 and 12 -> midi 60 and 72, padded by 2.
         assert_eq!((lo, hi), (58.0, 74.0));
+    }
+
+    #[test]
+    fn cents_to_target_is_continuous_not_quantized() {
+        // The bug: feeding a rounded MIDI quantized this to multiples of 100¢.
+        // Singing 30 cents sharp of the target must read ~+30¢, not 0.
+        assert!((cents_to_target(60.30, 60.0) - 30.0).abs() < 1e-9);
+        assert!(cents_to_target(60.0, 60.0).abs() < 1e-9);
+        assert!((cents_to_target(59.80, 60.0) + 20.0).abs() < 1e-9);
+        // Octave-off singing still reads as on-target (folded).
+        assert!(cents_to_target(72.0, 60.0).abs() < 1e-9);
+        assert!((cents_to_target(72.10, 60.0) - 10.0).abs() < 1e-9);
     }
 
     #[test]

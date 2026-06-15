@@ -2,8 +2,8 @@
 //! past a fixed playhead, with an optional cursor for the user's sung pitch.
 
 use iced::mouse;
-use iced::widget::canvas::{self, Frame, Path, Stroke};
-use iced::{Color, Point, Rectangle, Renderer, Size, Theme};
+use iced::widget::canvas::{self, Frame, Path, Stroke, Text};
+use iced::{Color, Pixels, Point, Rectangle, Renderer, Size, Theme};
 
 /// Seconds of already-passed / upcoming time shown in the lane window.
 pub const PAST_SECS: f64 = 1.0;
@@ -19,6 +19,9 @@ pub struct Bar {
     pub end: f64,
     pub midi: f64,
     pub golden: bool,
+    /// Note name + octave for the on-bar label (e.g. `"G", 4`).
+    pub name: &'static str,
+    pub octave: i32,
 }
 
 /// Canvas program drawing the scrolling pitch lane for the current moment.
@@ -84,20 +87,36 @@ impl<Message> canvas::Program<Message> for Lane {
             } else {
                 BLUE
             };
+            let y = y_of(bar.midi);
             frame.fill_rectangle(
-                Point::new(x0, y_of(bar.midi) - band / 2.0),
+                Point::new(x0, y - band / 2.0),
                 Size::new((x1 - x0).max(2.0), band),
                 color,
             );
+            // Label the bar with its note name so the player knows what to sing.
+            frame.fill_text(Text {
+                content: format!("{}{}", bar.name, bar.octave),
+                position: Point::new(x0 + 3.0, (y - band / 2.0 - 13.0).max(0.0)),
+                color: Color::from_rgba(1.0, 1.0, 1.0, 0.9),
+                size: Pixels(11.0),
+                ..Text::default()
+            });
         }
 
-        // Sung-pitch cursor at the playhead (Phase 2 populates `sung`).
+        // Sung-pitch cursor: a full-width line at your pitch (line it up with a
+        // bar = in tune) plus a solid marker at the playhead.
         if let Some(midi) = self.sung {
             let y = y_of(midi.clamp(self.lo, self.hi));
-            frame.fill(
-                &Path::circle(Point::new(head_x, y), band.min(9.0) / 1.5),
-                self.cursor_color,
+            frame.stroke(
+                &Path::line(Point::new(0.0, y), Point::new(w, y)),
+                Stroke::default()
+                    .with_color(Color {
+                        a: 0.45,
+                        ..self.cursor_color
+                    })
+                    .with_width(2.0),
             );
+            frame.fill(&Path::circle(Point::new(head_x, y), 6.0), self.cursor_color);
         }
 
         vec![frame.into_geometry()]
