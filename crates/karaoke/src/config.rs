@@ -7,7 +7,7 @@ use std::path::PathBuf;
 pub struct KaraokeConfig {
     #[serde(default = "default_enabled")]
     pub enabled: bool,
-    /// Song library directory; `None` uses `overlay::songs_dir()`.
+    /// UltraStar `.txt` library directory; `None` uses `overlay::data_dir("karaoke")`.
     #[serde(default)]
     pub library_dir: Option<PathBuf>,
     /// Manual sync nudge (ms) added to the playback position, to correct drift

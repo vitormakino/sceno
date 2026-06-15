@@ -13,7 +13,7 @@ system. Two shared library crates + three app binaries:
   `view`, `subscription`, + default-implemented surface geometry: `surface_height`, `anchor`,
   `events_transparent`, `stacks`, `initial_margin`) + `overlay::run::<A>()` wires an app into
   `iced_layershell`. Also home to generic config I/O (`load_config::<T>`/`save`), XDG paths
-  (`config_dir`/`cache_dir`/`songs_dir`), `ensure_single_instance`, event-driven auto-stacking,
+  (`config_dir`/`cache_dir`/`data_dir`), `ensure_single_instance`, event-driven auto-stacking,
   and `SCENO_DEBUG` tracing (`overlay::debug(tag, args)`).
 - **`pitch`** (lib) — mic capture + pitch math: `note` (`frequency_to_note`,
   `note_to_frequency`, `is_in_tune`, `Note` with a `midi` field), `smooth` (`Smoother`),
@@ -22,21 +22,24 @@ system. Two shared library crates + three app binaries:
   Used by `tuner` and `karaoke`.
 - **`media`** (lib) — now-playing + lyrics sources: `player` (MPRIS loop delivering a neutral
   `PlayerEvent` to a `sink(PlayerEvent) -> bool`), `sync::TimelineSync`, `cue` (`CueEntry` +
-  `cue_at`), `lrc`/`lrclib` (LRCLIB fetch + cache + library persist), `ultrastar` (`.txt`
+  `cue_at`), `lrc`/`lrclib` (LRCLIB fetch + on-disk store), `ultrastar` (`.txt`
   parser), and `library` (scan a folder, match by normalized artist/title). Used by `lyrics`
   and `karaoke`.
 - **`lyrics`** (bin) — synced caption overlay via `media` (MPRIS + LRCLIB). Owns its `SavedConfig`.
 - **`tuner`** (bin) — vocal tuner via `pitch`: mic → note + tuning meter.
-- **`karaoke`** (bin) — UltraStar karaoke: matches the playing track to a local `.txt` in the
-  song library and renders a scrolling Canvas pitch-lane (`lane.rs`), plus a live mic cursor
+- **`karaoke`** (bin) — UltraStar karaoke: matches the playing track to a local `.txt` in its
+  library and renders a scrolling Canvas pitch-lane (`lane.rs`), plus a live mic cursor
   (own `pitch::run_capture` stream) colored green when the sung pitch matches the target note
   (octave-folded). A tall, fixed panel: overrides `surface_height()=220` and `stacks()=false`
   so it owns its geometry instead of joining the thin-strip stacking. UltraStar `#GAP`/`#BPM`
   are calibrated to a specific recording, so a `KaraokeConfig.offset_ms` tray nudge corrects
   drift against arbitrary playback. `#RELATIVE` files are unsupported.
 
-The shared song library lives at `~/.local/share/sceno/songs` (`overlay::songs_dir`); `lyrics`
-also persists LRCLIB hits there as `Artist - Title.lrc` so they aren't re-downloaded.
+Each app owns a per-app data folder `~/.local/share/sceno/<app>` (`overlay::data_dir("<app>")`),
+so file kinds don't intermingle: `karaoke` reads UltraStar `.txt` from `…/sceno/karaoke`, while
+`lyrics` persists LRCLIB hits as `Artist - Title.lrc` into `…/sceno/lyrics` — that single
+human-named file is both the re-download guard and a browsable copy (there is no separate hash
+cache under `~/.cache`).
 
 Stack: `iced` 0.14 under `iced_layershell` 0.18 (wgpu), `ksni` tray, `serde`,
 `pitch-detection` (McLeod/MPM), `cpal`, `mpris`, `ureq`. `#[to_layer_message]` injects extra

@@ -69,7 +69,6 @@ pub fn fetch_synced(q: &TrackQuery) -> Option<String> {
     let lrc = network_fetch(q);
     if let Some(s) = &lrc {
         cache_write(q, s);
-        persist_to_library(q, s);
     }
     lrc
 }
@@ -155,24 +154,26 @@ fn best_match(tracks: Vec<LrclibTrack>, target: Option<u64>) -> Option<LrclibTra
     }
 }
 
-// ── On-disk cache ───────────────────────────────────────────────────────────
+// ── On-disk store ─────────────────────────────────────────────────────────────
+//
+// Downloaded lyrics are persisted as human-named `Artist - Title.lrc` under the
+// app's own data dir (`~/.local/share/sceno/lyrics`). That single file is both
+// the re-download guard and a browsable copy — there is no separate hash cache,
+// so the lyrics app keeps all its files in one folder.
 
-fn cache_dir() -> Option<PathBuf> {
-    overlay::cache_dir("lyrics")
+fn library_dir() -> Option<PathBuf> {
+    overlay::data_dir("lyrics")
 }
 
-fn cache_file(q: &TrackQuery) -> Option<PathBuf> {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    q.key().hash(&mut hasher);
-    cache_dir().map(|d| d.join(format!("{:016x}.lrc", hasher.finish())))
+fn library_file(q: &TrackQuery) -> Option<PathBuf> {
+    library_dir().map(|d| d.join(library_filename(q)))
 }
 
 fn cache_read(q: &TrackQuery) -> Option<String> {
     if cfg!(test) {
         return None;
     }
-    std::fs::read_to_string(cache_file(q)?)
+    std::fs::read_to_string(library_file(q)?)
         .ok()
         .filter(|s| !s.is_empty())
 }
@@ -181,16 +182,17 @@ fn cache_write(q: &TrackQuery, contents: &str) {
     if cfg!(test) {
         return;
     }
-    let Some(path) = cache_file(q) else { return };
+    let Some(path) = library_file(q) else { return };
+    if path.exists() {
+        return; // never clobber an existing (possibly curated) file
+    }
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     let _ = std::fs::write(path, contents);
 }
 
-// ── Local song library ──────────────────────────────────────────────────────
-
-/// `Artist - Title.lrc` (sanitized) — the filename convention the library reads.
+/// `Artist - Title.lrc` (sanitized) — the filename convention on disk.
 fn library_filename(q: &TrackQuery) -> String {
     let sanitize = |s: &str| {
         s.chars()
@@ -212,24 +214,6 @@ fn library_filename(q: &TrackQuery) -> String {
     } else {
         format!("{artist} - {title}.lrc")
     }
-}
-
-/// Save a freshly-fetched LRC into the shared song library so it is reused
-/// without re-downloading (and is matchable by the UltraStar/lyrics library).
-/// Never overwrites an existing file (e.g. a curated UltraStar `.txt` companion).
-fn persist_to_library(q: &TrackQuery, contents: &str) {
-    if cfg!(test) {
-        return;
-    }
-    let Some(dir) = overlay::songs_dir() else {
-        return;
-    };
-    let path = dir.join(library_filename(q));
-    if path.exists() {
-        return;
-    }
-    let _ = std::fs::create_dir_all(&dir);
-    let _ = std::fs::write(path, contents);
 }
 
 #[cfg(test)]

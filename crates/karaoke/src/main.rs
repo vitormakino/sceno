@@ -51,7 +51,7 @@ impl Default for State {
     fn default() -> Self {
         let cfg: KaraokeConfig = overlay::load_config(APP);
         let library_dir = cfg.library_dir.clone();
-        let dir = library_dir.clone().or_else(overlay::songs_dir);
+        let dir = library_dir.clone().or_else(|| overlay::data_dir(APP));
         let library = dir.map(|d| media::library::scan(&d)).unwrap_or_default();
         State {
             enabled: cfg.enabled,
