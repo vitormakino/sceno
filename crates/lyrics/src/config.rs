@@ -1,6 +1,8 @@
-//! Persisted lyrics settings (font size + enabled), stored as JSON via `overlay`.
+//! Persisted lyrics settings (font size, enabled, per-song sync offsets),
+//! stored as JSON via `overlay`.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Serialize, Deserialize)]
 pub struct SavedConfig {
@@ -8,6 +10,12 @@ pub struct SavedConfig {
     pub font_size_idx: usize,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    /// Manual sync nudge (ms) per song, keyed by [`media::TrackQuery::key`].
+    /// Added to the playback position so lyrics can be advanced (positive) or
+    /// delayed (negative) to match an arbitrary recording. A `0` offset is not
+    /// stored (the entry is removed), so this map only holds real customizations.
+    #[serde(default)]
+    pub offsets: HashMap<String, f64>,
 }
 
 fn default_font_idx() -> usize {
@@ -22,6 +30,7 @@ impl Default for SavedConfig {
         SavedConfig {
             font_size_idx: 1,
             enabled: true,
+            offsets: HashMap::new(),
         }
     }
 }
@@ -32,14 +41,18 @@ mod tests {
 
     #[test]
     fn saved_config_roundtrips_json() {
+        let mut offsets = HashMap::new();
+        offsets.insert("artist|title||0".to_string(), -150.0);
         let cfg = SavedConfig {
             font_size_idx: 2,
             enabled: false,
+            offsets,
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let loaded: SavedConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(loaded.font_size_idx, 2);
         assert!(!loaded.enabled);
+        assert_eq!(loaded.offsets.get("artist|title||0"), Some(&-150.0));
     }
 
     #[test]
@@ -47,6 +60,7 @@ mod tests {
         let cfg: SavedConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(cfg.font_size_idx, 1);
         assert!(cfg.enabled);
+        assert!(cfg.offsets.is_empty());
     }
 
     #[test]
@@ -55,5 +69,6 @@ mod tests {
             serde_json::from_str(r#"{"font_size_idx":2,"mode_idx":1,"enabled":true}"#).unwrap();
         assert_eq!(cfg.font_size_idx, 2);
         assert!(cfg.enabled);
+        assert!(cfg.offsets.is_empty());
     }
 }

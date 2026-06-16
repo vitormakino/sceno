@@ -1,11 +1,12 @@
 use futures::channel::mpsc;
 use futures::stream::BoxStream;
-use iced::widget::{container, text};
+use iced::widget::{container, row, text};
 use iced::{Color, Element, Subscription, Task};
 use iced_layershell::to_layer_message;
 use media::player::{self, PlayerEvent};
-use media::{CueEntry, TimelineSync, cue_at};
+use media::{CueEntry, TimelineSync, TrackQuery, cue_at};
 use overlay::FontSize;
+use std::collections::HashMap;
 
 mod config;
 use config::SavedConfig;
@@ -14,6 +15,13 @@ use config::SavedConfig;
 /// config/cache directory (`~/.config/sceno/lyrics`, `~/.cache/sceno/lyrics`).
 const APP: &str = "lyrics";
 
+/// One nudge step (ms) for the per-song sync offset.
+const NUDGE_MS: f64 = 100.0;
+
+/// How long (seconds, from track start) to announce the now-playing title while
+/// no lyric line is active — a heads-up of what's about to play.
+const ANNOUNCE_SECS: f64 = 5.0;
+
 // ── App types ─────────────────────────────────────────────────────────────────
 
 #[to_layer_message]
@@ -21,8 +29,12 @@ const APP: &str = "lyrics";
 enum Message {
     SetEnabled(bool),
     SetFontSize(FontSize),
-    CuesReceived(Vec<CueEntry>, TimelineSync),
+    TrackReceived(Option<TrackQuery>, Vec<CueEntry>, TimelineSync),
     SyncReceived(TimelineSync),
+    /// Adjust the current song's sync offset by ±`NUDGE_MS`.
+    NudgeOffset(f64),
+    /// Drop the current song's saved sync offset.
+    ClearOffset,
     TimelineTick,
 }
 
@@ -33,6 +45,12 @@ struct State {
     cues: Vec<CueEntry>,
     timeline_sync: Option<TimelineSync>,
     paused: bool,
+    /// Stable key of the playing track (for offset lookup), if known.
+    track_key: Option<String>,
+    /// Human-readable now-playing label, used for the intro announcement.
+    track_label: Option<String>,
+    /// Per-song sync offsets (ms), keyed by track. Mirrors the persisted config.
+    offsets: HashMap<String, f64>,
 }
 
 impl Default for State {
@@ -45,16 +63,58 @@ impl Default for State {
             cues: Vec::new(),
             timeline_sync: None,
             paused: false,
+            track_key: None,
+            track_label: None,
+            offsets: cfg.offsets,
         }
     }
 }
 
-/// Recompute the visible caption from the current cues and sync position.
+impl State {
+    /// The current song's sync offset in milliseconds (`0.0` if none saved).
+    fn current_offset_ms(&self) -> f64 {
+        self.track_key
+            .as_ref()
+            .and_then(|k| self.offsets.get(k))
+            .copied()
+            .unwrap_or(0.0)
+    }
+
+    /// Persist font size, enabled, and the per-song offset map.
+    fn persist(&self) {
+        overlay::save(
+            APP,
+            &SavedConfig {
+                font_size_idx: self.font_size.index(),
+                enabled: self.enabled,
+                offsets: self.offsets.clone(),
+            },
+        );
+    }
+}
+
+/// Build the now-playing label shown during the intro announcement.
+fn track_label(query: &TrackQuery) -> String {
+    if query.artist.trim().is_empty() {
+        format!("♪ {}", query.title)
+    } else {
+        format!("♪ {} — {}", query.artist, query.title)
+    }
+}
+
+/// Recompute the visible caption from the current cues and sync position,
+/// applying the song's sync offset. Falls back to the now-playing announcement
+/// during the track's intro when no lyric line is active.
 fn apply_timeline_caption(state: &mut State) {
     if let Some(sync) = &state.timeline_sync {
-        state.caption = cue_at(&state.cues, sync.current_time())
-            .map(String::from)
-            .unwrap_or_default();
+        let t = sync.current_time() + state.current_offset_ms() / 1000.0;
+        state.caption = if let Some(line) = cue_at(&state.cues, t) {
+            line.to_string()
+        } else if (0.0..ANNOUNCE_SECS).contains(&t) {
+            state.track_label.clone().unwrap_or_default()
+        } else {
+            String::new()
+        };
     }
 }
 
@@ -64,6 +124,12 @@ struct LyricsTray {
     tx: mpsc::UnboundedSender<Message>,
     enabled: bool,
     font_size: FontSize,
+}
+
+impl LyricsTray {
+    fn nudge(&self, delta: f64) {
+        let _ = self.tx.unbounded_send(Message::NudgeOffset(delta));
+    }
 }
 
 impl ksni::Tray for LyricsTray {
@@ -115,6 +181,34 @@ impl ksni::Tray for LyricsTray {
                                 ..Default::default()
                             },
                         ],
+                    }
+                    .into(),
+                ],
+                ..Default::default()
+            }
+            .into(),
+            MenuItem::Separator,
+            SubMenu {
+                label: "Sincronia (esta música)".into(),
+                submenu: vec![
+                    StandardItem {
+                        label: "Adiantar legenda (+100ms)".into(),
+                        activate: Box::new(|this: &mut Self| this.nudge(NUDGE_MS)),
+                        ..Default::default()
+                    }
+                    .into(),
+                    StandardItem {
+                        label: "Atrasar legenda (−100ms)".into(),
+                        activate: Box::new(|this: &mut Self| this.nudge(-NUDGE_MS)),
+                        ..Default::default()
+                    }
+                    .into(),
+                    StandardItem {
+                        label: "Limpar ajuste desta música".into(),
+                        activate: Box::new(|this: &mut Self| {
+                            let _ = this.tx.unbounded_send(Message::ClearOffset);
+                        }),
+                        ..Default::default()
                     }
                     .into(),
                 ],
@@ -180,28 +274,18 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
             } else {
                 state.caption.clear();
             }
-            overlay::save(
-                APP,
-                &SavedConfig {
-                    font_size_idx: state.font_size.index(),
-                    enabled: state.enabled,
-                },
-            );
+            state.persist();
         }
         Message::SetFontSize(s) => {
             state.font_size = s;
-            overlay::save(
-                APP,
-                &SavedConfig {
-                    font_size_idx: state.font_size.index(),
-                    enabled: state.enabled,
-                },
-            );
+            state.persist();
         }
-        Message::CuesReceived(cues, sync) => {
+        Message::TrackReceived(query, cues, sync) => {
             state.paused = sync.paused;
             state.cues = cues;
             state.timeline_sync = Some(sync);
+            state.track_key = query.as_ref().map(TrackQuery::key);
+            state.track_label = query.as_ref().map(track_label);
             if state.enabled {
                 apply_timeline_caption(state);
             }
@@ -210,6 +294,25 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
             state.paused = sync.paused;
             state.timeline_sync = Some(sync);
             if state.enabled {
+                apply_timeline_caption(state);
+            }
+        }
+        Message::NudgeOffset(delta) => {
+            if let Some(key) = state.track_key.clone() {
+                let v = state.offsets.entry(key.clone()).or_insert(0.0);
+                *v += delta;
+                if *v == 0.0 {
+                    state.offsets.remove(&key);
+                }
+                state.persist();
+                apply_timeline_caption(state);
+            }
+        }
+        Message::ClearOffset => {
+            if let Some(key) = &state.track_key
+                && state.offsets.remove(key).is_some()
+            {
+                state.persist();
                 apply_timeline_caption(state);
             }
         }
@@ -222,29 +325,46 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
 }
 
 fn view(state: &State) -> Element<'_, Message> {
-    container(
-        container(
+    let offset_ms = state.current_offset_ms();
+    // Only show the pill when there's something to display: a caption, or — so a
+    // mid-song nudge is visible even during a lyric gap — an active offset.
+    if state.caption.is_empty() && offset_ms == 0.0 {
+        return container(text(""))
+            .center_x(iced::Fill)
+            .center_y(iced::Fill)
+            .into();
+    }
+
+    let mut line = row![].spacing(10).align_y(iced::Center);
+    if !state.caption.is_empty() {
+        line = line.push(
             text(&state.caption)
                 .size(state.font_size.px())
                 .color(Color::WHITE),
-        )
-        .style(move |_theme| {
-            if state.caption.is_empty() {
-                container::Style::default()
-            } else {
-                container::Style {
-                    background: Some(iced::Background::Color(Color::from_rgba(
-                        0.0, 0.0, 0.0, 0.6,
-                    ))),
-                    border: iced::Border {
-                        radius: 6.0.into(),
-                        ..Default::default()
-                    },
+        );
+    }
+    // Evidence of the saved per-song customization: a dim "+/-NNN ms" chip.
+    if offset_ms != 0.0 {
+        line = line.push(
+            text(format!("⏱ {offset_ms:+.0} ms"))
+                .size((state.font_size.px() * 0.5).max(14.0))
+                .color(Color::from_rgba(1.0, 0.85, 0.4, 0.9)),
+        );
+    }
+
+    container(
+        container(line)
+            .style(|_theme| container::Style {
+                background: Some(iced::Background::Color(Color::from_rgba(
+                    0.0, 0.0, 0.0, 0.6,
+                ))),
+                border: iced::Border {
+                    radius: 6.0.into(),
                     ..Default::default()
-                }
-            }
-        })
-        .padding([6, 14]),
+                },
+                ..Default::default()
+            })
+            .padding([6, 14]),
     )
     .center_x(iced::Fill)
     .center_y(iced::Fill)
@@ -266,9 +386,9 @@ fn event_stream() -> BoxStream<'static, Message> {
 
     std::thread::spawn(move || {
         player::run(|ev| match ev {
-            PlayerEvent::Track { cues, sync, .. } => {
-                tx.unbounded_send(Message::CuesReceived(cues, sync)).is_ok()
-            }
+            PlayerEvent::Track { query, cues, sync } => tx
+                .unbounded_send(Message::TrackReceived(query, cues, sync))
+                .is_ok(),
             PlayerEvent::Sync(sync) => tx.unbounded_send(Message::SyncReceived(sync)).is_ok(),
         })
     });
@@ -304,6 +424,18 @@ mod tests {
             cues: Vec::new(),
             timeline_sync: None,
             paused: false,
+            track_key: None,
+            track_label: None,
+            offsets: HashMap::new(),
+        }
+    }
+
+    fn sample_query() -> TrackQuery {
+        TrackQuery {
+            artist: "Daft Punk".into(),
+            title: "Get Lucky".into(),
+            album: None,
+            duration: None,
         }
     }
 
@@ -402,23 +534,113 @@ mod tests {
     // ── CuesReceived ──────────────────────────────────────────────────────────
 
     #[test]
-    fn cues_received_updates_caption_and_paused() {
+    fn track_received_updates_caption_and_paused() {
         let mut s = test_state();
         let sync = paused_sync(2.0);
-        let _ = update(&mut s, Message::CuesReceived(sample_cues(), sync));
+        let _ = update(
+            &mut s,
+            Message::TrackReceived(Some(sample_query()), sample_cues(), sync),
+        );
         assert_eq!(s.caption, "hello");
         assert!(s.paused);
+        assert_eq!(s.track_key, Some(sample_query().key()));
     }
 
     #[test]
-    fn cues_received_silent_when_disabled() {
+    fn track_received_silent_when_disabled() {
         let mut s = test_state();
         s.enabled = false;
         let _ = update(
             &mut s,
-            Message::CuesReceived(sample_cues(), paused_sync(2.0)),
+            Message::TrackReceived(None, sample_cues(), paused_sync(2.0)),
         );
         assert_eq!(s.caption, "");
+    }
+
+    // ── Announcement ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn announces_title_during_intro_when_no_cue() {
+        let mut s = test_state();
+        // Intro (t=0.5): no cue active, so the now-playing label shows.
+        let _ = update(
+            &mut s,
+            Message::TrackReceived(Some(sample_query()), sample_cues(), paused_sync(0.5)),
+        );
+        assert_eq!(s.caption, "♪ Daft Punk — Get Lucky");
+    }
+
+    #[test]
+    fn announcement_yields_to_active_cue() {
+        let mut s = test_state();
+        // At t=2.0 the first cue is active and wins over the announcement.
+        let _ = update(
+            &mut s,
+            Message::TrackReceived(Some(sample_query()), sample_cues(), paused_sync(2.0)),
+        );
+        assert_eq!(s.caption, "hello");
+    }
+
+    #[test]
+    fn no_announcement_after_intro_window() {
+        let mut s = test_state();
+        s.cues = Vec::new();
+        s.track_label = Some("♪ Daft Punk — Get Lucky".into());
+        s.timeline_sync = Some(paused_sync(ANNOUNCE_SECS + 1.0));
+        apply_timeline_caption(&mut s);
+        assert_eq!(s.caption, "");
+    }
+
+    // ── Per-song offset ───────────────────────────────────────────────────────
+
+    #[test]
+    fn nudge_shifts_active_cue() {
+        let mut s = test_state();
+        s.track_key = Some("k".into());
+        s.cues = sample_cues();
+        s.timeline_sync = Some(paused_sync(2.9)); // "hello" ends at 3.0
+        // Advance lyrics by 200ms → t becomes 3.1, landing in "world".
+        let _ = update(&mut s, Message::NudgeOffset(200.0));
+        assert_eq!(s.offsets.get("k"), Some(&200.0));
+        assert_eq!(s.caption, "world");
+    }
+
+    #[test]
+    fn nudge_back_to_zero_removes_entry() {
+        let mut s = test_state();
+        s.track_key = Some("k".into());
+        let _ = update(&mut s, Message::NudgeOffset(100.0));
+        let _ = update(&mut s, Message::NudgeOffset(-100.0));
+        assert!(!s.offsets.contains_key("k"));
+        assert_eq!(s.current_offset_ms(), 0.0);
+    }
+
+    #[test]
+    fn nudge_without_track_is_noop() {
+        let mut s = test_state();
+        s.track_key = None;
+        let _ = update(&mut s, Message::NudgeOffset(100.0));
+        assert!(s.offsets.is_empty());
+    }
+
+    #[test]
+    fn clear_offset_drops_saved_entry() {
+        let mut s = test_state();
+        s.track_key = Some("k".into());
+        s.offsets.insert("k".into(), 300.0);
+        let _ = update(&mut s, Message::ClearOffset);
+        assert!(!s.offsets.contains_key("k"));
+    }
+
+    #[test]
+    fn offset_persists_across_track_switch() {
+        let mut s = test_state();
+        s.offsets.insert("k".into(), 150.0);
+        // A different track has no offset; switching back restores 150ms.
+        s.track_key = Some("other".into());
+        assert_eq!(s.current_offset_ms(), 0.0);
+        s.track_key = Some("k".into());
+        assert_eq!(s.current_offset_ms(), 150.0);
     }
 
     // ── SyncReceived ──────────────────────────────────────────────────────────
