@@ -26,6 +26,12 @@ system. Two shared library crates + three app binaries:
   parser), and `library` (scan a folder, match by normalized artist/title). Used by `lyrics`
   and `karaoke`.
 - **`lyrics`** (bin) — synced caption overlay via `media` (MPRIS + LRCLIB). Owns its `SavedConfig`.
+  Announces the now-playing title (`♪ Artist — Title`) during the first `ANNOUNCE_SECS` of a
+  track while no lyric line is active. A per-song sync nudge corrects drift against arbitrary
+  recordings: `SavedConfig.offsets` maps `TrackQuery::key()` → ms, added to the playback position
+  (positive advances the lyrics, negative delays); the tray's **Sincronia** submenu nudges by
+  ±100 ms or clears the current song's entry (a `0` offset removes the entry), and an active
+  offset shows as a dim `⏱ ±NNN ms` chip in the overlay.
 - **`tuner`** (bin) — vocal tuner via `pitch`: mic → note + tuning meter.
 - **`karaoke`** (bin) — UltraStar karaoke: matches the playing track to a local `.txt` in its
   library and renders a scrolling Canvas pitch-lane (`lane.rs`), plus a live mic cursor
