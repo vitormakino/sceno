@@ -206,6 +206,11 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
             if let Some(song) = &state.song {
                 state.range = midi_range(song);
             }
+            let matched = state.song.as_ref().map_or(0, |s| s.notes.len());
+            overlay::debug(
+                "karaoke",
+                format_args!("track {query:?} -> {matched} matched notes"),
+            );
         }
         Message::SyncUpdate(sync) => {
             state.paused = sync.paused;
