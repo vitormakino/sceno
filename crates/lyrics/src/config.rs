@@ -16,12 +16,18 @@ pub struct SavedConfig {
     /// stored (the entry is removed), so this map only holds real customizations.
     #[serde(default)]
     pub offsets: HashMap<String, f64>,
+    /// Whether to show the upcoming line dimmed below the active one (lookahead).
+    #[serde(default = "default_show_next")]
+    pub show_next: bool,
 }
 
 fn default_font_idx() -> usize {
     1
 }
 fn default_enabled() -> bool {
+    true
+}
+fn default_show_next() -> bool {
     true
 }
 
@@ -31,6 +37,7 @@ impl Default for SavedConfig {
             font_size_idx: 1,
             enabled: true,
             offsets: HashMap::new(),
+            show_next: true,
         }
     }
 }
@@ -47,12 +54,14 @@ mod tests {
             font_size_idx: 2,
             enabled: false,
             offsets,
+            show_next: false,
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let loaded: SavedConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(loaded.font_size_idx, 2);
         assert!(!loaded.enabled);
         assert_eq!(loaded.offsets.get("artist|title||0"), Some(&-150.0));
+        assert!(!loaded.show_next);
     }
 
     #[test]
@@ -61,6 +70,7 @@ mod tests {
         assert_eq!(cfg.font_size_idx, 1);
         assert!(cfg.enabled);
         assert!(cfg.offsets.is_empty());
+        assert!(cfg.show_next);
     }
 
     #[test]
