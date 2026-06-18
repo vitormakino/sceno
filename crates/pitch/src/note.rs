@@ -17,6 +17,36 @@ const NAMES: [&str; 12] = [
     "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
 ];
 
+impl Note {
+    /// Build a note pinned to a fixed MIDI number with a known cents deviation.
+    /// Used for instrument tuning, where the readout snaps to a target string
+    /// rather than the nearest chromatic note.
+    pub fn at_midi(midi: i64, cents: f64) -> Note {
+        let (name, octave) = midi_name(midi);
+        Note {
+            name,
+            octave,
+            midi: midi as f64,
+            cents,
+        }
+    }
+}
+
+/// The target MIDI note nearest to `freq` (Hz) under reference `a4`, with the
+/// signed cents deviation from it. `targets` is an instrument's open-string MIDI
+/// set; returns `None` if it is empty or `freq` is not positive.
+pub fn nearest_target(freq: f64, a4: f64, targets: &[i64]) -> Option<(i64, f64)> {
+    if targets.is_empty() || freq <= 0.0 {
+        return None;
+    }
+    let frac = 69.0 + 12.0 * (freq / a4).log2();
+    let best = targets
+        .iter()
+        .copied()
+        .min_by(|&a, &b| (frac - a as f64).abs().total_cmp(&(frac - b as f64).abs()))?;
+    Some((best, (frac - best as f64) * 100.0))
+}
+
 /// Nearest note to `freq` (Hz), with reference `a4` (usually [`A4`]).
 pub fn frequency_to_note(freq: f64, a4: f64) -> Note {
     let midi = 69.0 + 12.0 * (freq / a4).log2();
@@ -105,5 +135,50 @@ mod tests {
         // A4 ⇒ 440, middle C ⇒ ~261.63.
         assert!(approx(note_to_frequency(69.0, 440.0), 440.0, 1e-9));
         assert!(approx(note_to_frequency(60.0, 440.0), 261.626, 0.01));
+    }
+
+    // Standard guitar open strings: E2 A2 D3 G3 B3 E4.
+    const GUITAR: [i64; 6] = [40, 45, 50, 55, 59, 64];
+
+    #[test]
+    fn nearest_target_picks_closest_string() {
+        // Low E string ≈ 82.41 Hz at A440 → E2 (midi 40), ~0¢.
+        let (midi, cents) = nearest_target(82.41, 440.0, &GUITAR).unwrap();
+        assert_eq!(midi, 40);
+        assert!(approx(cents, 0.0, 1.0), "cents {cents}");
+        assert_eq!(midi_name(midi), ("E", 2));
+    }
+
+    #[test]
+    fn nearest_target_signs_cents() {
+        // A bit sharp of A2 (110 Hz) → A2 (midi 45) with positive cents.
+        let (midi, cents) = nearest_target(112.0, 440.0, &GUITAR).unwrap();
+        assert_eq!(midi, 45);
+        assert!(cents > 0.0 && cents < 50.0, "cents {cents}");
+    }
+
+    #[test]
+    fn nearest_target_reference_shifts_cents() {
+        // The same input Hz reads differently against a 432 Hz reference.
+        let (m440, c440) = nearest_target(110.0, 440.0, &GUITAR).unwrap();
+        let (m432, c432) = nearest_target(110.0, 432.0, &GUITAR).unwrap();
+        assert_eq!(m440, 45);
+        assert_eq!(m432, 45);
+        assert!((c440 - c432).abs() > 10.0, "{c440} vs {c432}");
+    }
+
+    #[test]
+    fn nearest_target_empty_or_invalid_is_none() {
+        assert!(nearest_target(110.0, 440.0, &[]).is_none());
+        assert!(nearest_target(0.0, 440.0, &GUITAR).is_none());
+        assert!(nearest_target(-5.0, 440.0, &GUITAR).is_none());
+    }
+
+    #[test]
+    fn at_midi_derives_name_and_octave() {
+        let n = Note::at_midi(40, 12.0);
+        assert_eq!((n.name, n.octave), ("E", 2));
+        assert_eq!(n.midi, 40.0);
+        assert!(approx(n.cents, 12.0, 1e-9));
     }
 }

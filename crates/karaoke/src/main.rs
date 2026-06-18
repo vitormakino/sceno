@@ -359,7 +359,10 @@ fn event_stream() -> BoxStream<'static, Message> {
 
     // Own microphone stream (no IPC with the tuner process), always-on like tuner.
     std::thread::spawn(move || {
-        pitch::run_capture(|note| tx.unbounded_send(Message::PitchUpdate(note)).is_ok());
+        pitch::run_capture(|freq| {
+            let note = freq.map(|f| pitch::frequency_to_note(f, pitch::A4));
+            tx.unbounded_send(Message::PitchUpdate(note)).is_ok()
+        });
     });
 
     Box::pin(rx)

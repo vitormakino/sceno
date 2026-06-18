@@ -1,14 +1,15 @@
 //! Microphone capture + analysis loop, reusable across apps.
 //!
 //! Owns the cpal input stream and a 50 ms analysis loop, delivering a smoothed
-//! [`Note`] (or `None`) to a caller-supplied `sink` each tick. The `sink` returns
-//! `false` to stop the loop (e.g. its receiver was dropped because the app is exiting).
+//! fundamental frequency in Hz (or `None`) to a caller-supplied `sink` each tick.
+//! Consumers map the frequency to a [`crate::note::Note`] with whatever reference
+//! pitch they want. The `sink` returns `false` to stop the loop (e.g. its receiver
+//! was dropped because the app is exiting).
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::{Arc, Mutex};
 
 use crate::detect::detect_frequency;
-use crate::note::{A4, Note, frequency_to_note};
 use crate::smooth::Smoother;
 
 /// Analysis window size (samples) — also the minimum buffer fill before detecting.
@@ -17,9 +18,9 @@ pub const WINDOW: usize = 4096;
 pub const MIN_CLARITY: f64 = 0.6;
 
 /// Open the default input device and run the capture/analysis loop, calling
-/// `sink` with each smoothed note. Blocks; intended to own a dedicated thread.
-/// Returns when `sink` returns `false` or the device/stream can't be set up.
-pub fn run_capture(mut sink: impl FnMut(Option<Note>) -> bool) {
+/// `sink` with each smoothed frequency (Hz). Blocks; intended to own a dedicated
+/// thread. Returns when `sink` returns `false` or the device/stream can't be set up.
+pub fn run_capture(mut sink: impl FnMut(Option<f64>) -> bool) {
     let host = cpal::default_host();
     let Some(device) = host.default_input_device() else {
         eprintln!("[pitch] no input device");
@@ -128,14 +129,11 @@ pub fn run_capture(mut sink: impl FnMut(Option<Note>) -> bool) {
         let raw = (window.len() >= WINDOW)
             .then(|| detect_frequency(&window, sample_rate, MIN_CLARITY))
             .flatten();
-        let note = smoother.update(raw).map(|f| frequency_to_note(f, A4));
-        if let Some(n) = &note {
-            overlay::debug(
-                "pitch",
-                format_args!("{}{} {:+.0} cents", n.name, n.octave, n.cents),
-            );
+        let freq = smoother.update(raw);
+        if let Some(f) = freq {
+            overlay::debug("pitch", format_args!("{f:.1} Hz"));
         }
-        if !sink(note) {
+        if !sink(freq) {
             break;
         }
     }
