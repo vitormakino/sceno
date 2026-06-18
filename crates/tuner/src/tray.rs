@@ -2,13 +2,16 @@
 
 use futures::channel::mpsc::UnboundedSender;
 
-use crate::Message;
+use crate::instrument::Instrument;
 use crate::meter::MeterStyle;
+use crate::{Message, REFERENCES};
 
 pub struct TunerTray {
     pub tx: UnboundedSender<Message>,
     pub enabled: bool,
     pub style: MeterStyle,
+    pub a4_hz: f64,
+    pub instrument: Instrument,
 }
 
 impl ksni::Tray for TunerTray {
@@ -21,6 +24,11 @@ impl ksni::Tray for TunerTray {
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
         use ksni::menu::*;
         let style = self.style;
+        let ref_idx = REFERENCES
+            .iter()
+            .position(|&r| (r - self.a4_hz).abs() < 0.5)
+            .unwrap_or(1);
+        let inst_idx = self.instrument.index();
         vec![
             CheckmarkItem {
                 label: "Overlay ativo".into(),
@@ -56,6 +64,52 @@ impl ksni::Tray for TunerTray {
                                 ..Default::default()
                             },
                         ],
+                    }
+                    .into(),
+                ],
+                ..Default::default()
+            }
+            .into(),
+            SubMenu {
+                label: "Referência".into(),
+                submenu: vec![
+                    RadioGroup {
+                        selected: ref_idx,
+                        select: Box::new(|this: &mut Self, idx| {
+                            let hz = REFERENCES.get(idx).copied().unwrap_or(440.0);
+                            this.a4_hz = hz;
+                            let _ = this.tx.unbounded_send(Message::SetReference(hz));
+                        }),
+                        options: REFERENCES
+                            .iter()
+                            .map(|r| RadioItem {
+                                label: format!("{r:.0} Hz"),
+                                ..Default::default()
+                            })
+                            .collect(),
+                    }
+                    .into(),
+                ],
+                ..Default::default()
+            }
+            .into(),
+            SubMenu {
+                label: "Instrumento".into(),
+                submenu: vec![
+                    RadioGroup {
+                        selected: inst_idx,
+                        select: Box::new(|this: &mut Self, idx| {
+                            let inst = Instrument::from_idx(idx);
+                            this.instrument = inst;
+                            let _ = this.tx.unbounded_send(Message::SetInstrument(inst));
+                        }),
+                        options: Instrument::ALL
+                            .iter()
+                            .map(|i| RadioItem {
+                                label: i.label().into(),
+                                ..Default::default()
+                            })
+                            .collect(),
                     }
                     .into(),
                 ],

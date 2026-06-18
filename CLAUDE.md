@@ -73,8 +73,18 @@ Anti-jitter smoothing (`crates/tuner/src/smooth.rs`, `Smoother`): EMA on frequen
 (`ALPHA = 0.25`) + a "hold" of `HOLD_FRAMES = 6` `None` frames (~300 ms) before dropping,
 then resets cold so the next onset isn't dragged toward the old pitch.
 
-Style + on/off are persisted as `TunerConfig { meter_style_idx, enabled }` in
-`~/.config/sceno/tuner/config.json` (Needle + enabled by default).
+**Reference pitch + instrument presets:** `pitch::run_capture` hands consumers the
+smoothed *frequency* (Hz); the tuner maps it to a note with its chosen `a4_hz` reference
+(tray **Referência**: 432/440/442/443) and `Instrument` preset (tray **Instrumento**:
+Cromático/Violão/Baixo/Ukulele/Violino, `crates/tuner/src/instrument.rs`). A non-chromatic
+preset snaps the readout to the nearest open string via `pitch::nearest_target` →
+`Note::at_midi`; chromatic uses `frequency_to_note`. `State.last_freq` is kept so a
+reference/instrument change re-maps immediately (`State::remap`). `karaoke` maps the same
+frequency with the `pitch::A4` constant (unchanged).
+
+Style/on-off/reference/instrument are persisted as
+`TunerConfig { meter_style_idx, enabled, a4_hz, instrument_idx }` in
+`~/.config/sceno/tuner/config.json` (Needle + enabled + 440 Hz + Chromatic by default).
 
 ## Conventions
 

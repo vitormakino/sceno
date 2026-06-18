@@ -6,23 +6,38 @@ use iced_layershell::to_layer_message;
 
 mod audio;
 mod config;
+mod instrument;
 mod meter;
 mod tray;
+use instrument::Instrument;
 use pitch::Note;
+
+/// Selectable reference pitches (Hz) for A4, offered in the tray.
+pub const REFERENCES: [f64; 4] = [432.0, 440.0, 442.0, 443.0];
 
 #[to_layer_message]
 #[derive(Debug, Clone)]
 enum Message {
-    PitchUpdate(Option<Note>),
+    /// Smoothed fundamental frequency (Hz) from the mic, or `None` on silence.
+    PitchUpdate(Option<f64>),
     SetEnabled(bool),
     SetMeterStyle(meter::MeterStyle),
+    /// Change the A4 reference pitch (Hz).
+    SetReference(f64),
+    /// Change the instrument tuning preset.
+    SetInstrument(Instrument),
     StrobeTick,
 }
 
 struct State {
+    /// Last smoothed frequency (Hz), kept so a reference/instrument change re-maps
+    /// the readout without waiting for the next mic frame.
+    last_freq: Option<f64>,
     note: Option<Note>,
     enabled: bool,
     style: meter::MeterStyle,
+    a4_hz: f64,
+    instrument: Instrument,
     strobe_phase: f32,
 }
 
@@ -30,21 +45,43 @@ impl Default for State {
     fn default() -> Self {
         let cfg: config::TunerConfig = overlay::load_config("tuner");
         State {
+            last_freq: None,
             note: None,
             enabled: cfg.enabled,
             style: meter::MeterStyle::from_idx(cfg.meter_style_idx),
+            a4_hz: cfg.a4_hz,
+            instrument: Instrument::from_idx(cfg.instrument_idx),
             strobe_phase: 0.0,
         }
     }
 }
 
+/// Map a frequency to the displayed note: nearest chromatic note (chromatic
+/// preset) or the nearest open string (instrument preset).
+fn note_from(freq: f64, a4: f64, inst: Instrument) -> Note {
+    match pitch::nearest_target(freq, a4, inst.targets()) {
+        Some((midi, cents)) => Note::at_midi(midi, cents),
+        None => pitch::frequency_to_note(freq, a4),
+    }
+}
+
 impl State {
+    /// Recompute the displayed note from the last frequency under the current
+    /// reference and instrument.
+    fn remap(&mut self) {
+        self.note = self
+            .last_freq
+            .map(|f| note_from(f, self.a4_hz, self.instrument));
+    }
+
     fn persist(&self) {
         overlay::save(
             "tuner",
             &config::TunerConfig {
                 meter_style_idx: self.style.index(),
                 enabled: self.enabled,
+                a4_hz: self.a4_hz,
+                instrument_idx: self.instrument.index(),
             },
         );
     }
@@ -60,13 +97,26 @@ impl overlay::OverlayApp for State {
     }
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::PitchUpdate(n) => self.note = n,
+            Message::PitchUpdate(freq) => {
+                self.last_freq = freq;
+                self.remap();
+            }
             Message::SetEnabled(on) => {
                 self.enabled = on;
                 self.persist();
             }
             Message::SetMeterStyle(s) => {
                 self.style = s;
+                self.persist();
+            }
+            Message::SetReference(hz) => {
+                self.a4_hz = hz;
+                self.remap();
+                self.persist();
+            }
+            Message::SetInstrument(inst) => {
+                self.instrument = inst;
+                self.remap();
                 self.persist();
             }
             Message::StrobeTick => {
@@ -155,6 +205,8 @@ fn event_stream() -> BoxStream<'static, Message> {
         tx: tx.clone(),
         enabled: cfg.enabled,
         style: meter::MeterStyle::from_idx(cfg.meter_style_idx),
+        a4_hz: cfg.a4_hz,
+        instrument: Instrument::from_idx(cfg.instrument_idx),
     })
     .spawn();
 
@@ -178,4 +230,52 @@ fn strobe_tick_stream() -> BoxStream<'static, Message> {
 
 fn main() -> iced_layershell::Result {
     overlay::run::<State>()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chromatic_uses_nearest_note() {
+        let n = note_from(440.0, 440.0, Instrument::Chromatic);
+        assert_eq!((n.name, n.octave), ("A", 4));
+        assert!(n.cents.abs() < 0.1, "cents {}", n.cents);
+    }
+
+    #[test]
+    fn reference_shifts_chromatic_cents() {
+        // 440 Hz read against a 442 reference is slightly flat.
+        let n = note_from(440.0, 442.0, Instrument::Chromatic);
+        assert_eq!(n.name, "A");
+        assert!(n.cents < 0.0, "cents {}", n.cents);
+    }
+
+    #[test]
+    fn guitar_preset_snaps_to_string() {
+        // 110 Hz is the open A string → A2, in tune.
+        let n = note_from(110.0, 440.0, Instrument::Guitar);
+        assert_eq!((n.name, n.octave), ("A", 2));
+        assert!(n.cents.abs() < 1.0, "cents {}", n.cents);
+    }
+
+    #[test]
+    fn remap_follows_instrument_change() {
+        let mut s = State {
+            last_freq: Some(110.0),
+            note: None,
+            enabled: true,
+            style: meter::MeterStyle::Needle,
+            a4_hz: 440.0,
+            instrument: Instrument::Chromatic,
+            strobe_phase: 0.0,
+        };
+        s.remap();
+        // Chromatic: 110 Hz is A2 (nearest note) too — check octave.
+        assert_eq!(s.note.unwrap().octave, 2);
+        s.instrument = Instrument::Guitar;
+        s.remap();
+        let n = s.note.unwrap();
+        assert_eq!((n.name, n.octave), ("A", 2));
+    }
 }
