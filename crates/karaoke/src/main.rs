@@ -5,13 +5,16 @@ use iced::{Color, Element, Subscription, Task};
 use iced_layershell::to_layer_message;
 use media::player::{self, PlayerEvent};
 use media::{TimelineSync, TrackQuery, UltraStarSong};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 mod config;
 mod lane;
+mod score;
 mod tray;
 use config::KaraokeConfig;
 use lane::{AHEAD_SECS, Bar, Lane, PAST_SECS};
+use score::Scorer;
 
 /// App name: Wayland namespace, single-instance lock, config dir.
 const APP: &str = "karaoke";
@@ -45,6 +48,12 @@ struct State {
     paused: bool,
     /// Latest mic pitch (Phase 2 feedback cursor).
     current_note: Option<pitch::Note>,
+    /// Live accuracy score for the current song.
+    scorer: Scorer,
+    /// Stable key of the matched track (for the best-score map), if known.
+    track_key: Option<String>,
+    /// Per-song best score (%), keyed by track. Mirrors the persisted config.
+    best: HashMap<String, f64>,
 }
 
 impl Default for State {
@@ -63,6 +72,9 @@ impl Default for State {
             timeline_sync: None,
             paused: false,
             current_note: None,
+            scorer: Scorer::default(),
+            track_key: None,
+            best: cfg.best_scores,
         }
     }
 }
@@ -75,6 +87,7 @@ impl State {
                 enabled: self.enabled,
                 library_dir: self.library_dir.clone(),
                 offset_ms: self.offset_ms,
+                best_scores: self.best.clone(),
             },
         );
     }
@@ -84,6 +97,25 @@ impl State {
         self.timeline_sync
             .as_ref()
             .map(|s| s.current_time() + self.offset_ms / 1000.0)
+    }
+
+    /// The current song's best score, if any.
+    fn current_best(&self) -> Option<f64> {
+        self.track_key
+            .as_ref()
+            .and_then(|k| self.best.get(k))
+            .copied()
+    }
+
+    /// Fold the current run's score into the in-memory per-song best (no disk I/O;
+    /// cheap to call every frame). Persistence happens on track change / disable.
+    fn fold_best(&mut self) {
+        if let (Some(key), Some(pct)) = (self.track_key.clone(), self.scorer.pct()) {
+            let best = self.best.entry(key).or_insert(0.0);
+            if pct > *best {
+                *best = pct;
+            }
+        }
     }
 }
 
@@ -119,6 +151,40 @@ fn octave_fold(mut v: f64, target: f64) -> f64 {
 /// feedback keeps fractional precision instead of snapping to whole semitones.
 fn cents_to_target(sung_pitch: f64, target: f64) -> f64 {
     (octave_fold(sung_pitch, target) - target) * 100.0
+}
+
+/// Sample the accuracy score for the current frame (called on each `Tick`).
+fn score_tick(state: &mut State) {
+    let Some(t) = state.current_time() else {
+        return;
+    };
+    // Resolve the active target into owned values so the immutable borrow of
+    // `song` ends before we touch `&mut state.scorer`.
+    let target = state.song.as_ref().and_then(|song| {
+        song.notes
+            .iter()
+            .find(|n| n.start <= t && t < n.end)
+            .map(|n| (n.midi, n.golden))
+    });
+    let sung_cents = match (state.current_note, target) {
+        (Some(note), Some((midi, _))) => {
+            Some(cents_to_target(note.midi + note.cents / 100.0, midi))
+        }
+        _ => None,
+    };
+    let golden = target.is_some_and(|(_, g)| g);
+    state.scorer.sample(t, target.is_some(), golden, sung_cents);
+    state.fold_best();
+}
+
+/// Color the live score by grade: ≥90 green, ≥70 amber, lower red, none dim.
+fn score_grade_color(pct: Option<f64>) -> Color {
+    match pct {
+        Some(p) if p >= 90.0 => Color::from_rgb(0.30, 0.90, 0.30),
+        Some(p) if p >= 70.0 => Color::from_rgb(0.95, 0.75, 0.20),
+        Some(_) => Color::from_rgb(0.90, 0.45, 0.45),
+        None => Color::from_rgba(1.0, 1.0, 1.0, 0.6),
+    }
 }
 
 /// The syllables of the phrase active at time `t`, joined (UltraStar syllables
@@ -189,6 +255,10 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
     match msg {
         Message::SetEnabled(e) => {
             state.enabled = e;
+            // Save any record earned before hiding the panel.
+            if !e {
+                state.fold_best();
+            }
             state.persist();
         }
         Message::SetOffset(o) => {
@@ -198,13 +268,20 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
         Message::TrackChanged(query, sync) => {
             state.paused = sync.paused;
             state.timeline_sync = Some(sync);
-            state.song = query
-                .as_ref()
-                .and_then(|q| media::library::match_track(&state.library, q))
-                .and_then(media::library::load)
-                .and_then(media::library::Song::into_ultrastar);
-            if let Some(song) = &state.song {
-                state.range = midi_range(song);
+            let new_key = query.as_ref().map(TrackQuery::key);
+            // Only reset/reload when the track actually changes — a re-emitted
+            // event for the same song must not wipe the run in progress.
+            if new_key != state.track_key {
+                state.fold_best(); // bank the leaving song's record…
+                state.persist(); // …and write it to disk
+                state.scorer.reset();
+                state.track_key = new_key;
+                state.song = query
+                    .as_ref()
+                    .and_then(|q| media::library::match_track(&state.library, q))
+                    .and_then(media::library::load)
+                    .and_then(media::library::Song::into_ultrastar);
+                state.range = state.song.as_ref().map_or((60.0, 72.0), midi_range);
             }
         }
         Message::SyncUpdate(sync) => {
@@ -212,7 +289,9 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
             state.timeline_sync = Some(sync);
         }
         Message::PitchUpdate(n) => state.current_note = n,
-        Message::Tick => {}
+        Message::Tick => {
+            score_tick(state);
+        }
         _ => {}
     }
     Task::none()
@@ -292,11 +371,25 @@ fn view(state: &State) -> Element<'_, Message> {
             Color::from_rgba(1.0, 1.0, 1.0, 0.6),
         ),
     };
-    let readout = iced::widget::row![
+    let score_label = match state.scorer.pct() {
+        Some(p) => format!("Pontos: {p:.0}%"),
+        None => "Pontos: —".to_string(),
+    };
+    let mut readout = iced::widget::row![
         text(target_label).size(18.0).color(Color::WHITE),
         text(you_label).size(18.0).color(you_color),
+        text(score_label)
+            .size(18.0)
+            .color(score_grade_color(state.scorer.pct())),
     ]
     .spacing(28);
+    if let Some(best) = state.current_best() {
+        readout = readout.push(
+            text(format!("Recorde: {best:.0}%"))
+                .size(16.0)
+                .color(Color::from_rgba(1.0, 1.0, 1.0, 0.6)),
+        );
+    }
 
     let lane = canvas(Lane {
         bars,
@@ -388,6 +481,60 @@ fn main() -> iced_layershell::Result {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    fn test_state() -> State {
+        State {
+            enabled: true,
+            offset_ms: 0.0,
+            library_dir: None,
+            library: Vec::new(),
+            song: None,
+            range: (60.0, 72.0),
+            timeline_sync: None,
+            paused: false,
+            current_note: None,
+            scorer: Scorer::default(),
+            track_key: Some("k".into()),
+            best: HashMap::new(),
+        }
+    }
+
+    /// Drive the scorer to a steady percentage (two on/off samples).
+    fn run_scorer(s: &mut State, cents: Option<f64>) {
+        s.scorer.reset();
+        s.scorer.sample(0.0, true, false, cents);
+        s.scorer.sample(0.1, true, false, cents);
+    }
+
+    #[test]
+    fn fold_best_records_and_keeps_max() {
+        let mut s = test_state();
+        run_scorer(&mut s, Some(0.0)); // perfect → 100%
+        s.fold_best();
+        assert_eq!(s.best.get("k"), Some(&100.0));
+        // A worse later run must not lower the record.
+        run_scorer(&mut s, Some(50.0)); // 0%
+        s.fold_best();
+        assert_eq!(s.best.get("k"), Some(&100.0));
+    }
+
+    #[test]
+    fn fold_best_noop_without_track_key() {
+        let mut s = test_state();
+        s.track_key = None;
+        run_scorer(&mut s, Some(0.0));
+        s.fold_best();
+        assert!(s.best.is_empty());
+    }
+
+    #[test]
+    fn current_best_reads_map() {
+        let mut s = test_state();
+        assert_eq!(s.current_best(), None);
+        s.best.insert("k".into(), 42.0);
+        assert_eq!(s.current_best(), Some(42.0));
+    }
 
     const SONG: &str = "#TITLE:T\n#ARTIST:A\n#BPM:120\n#GAP:0\n\
 : 0 4 0 Hel\n: 4 4 0 lo\n- 8\n: 8 4 12 World\nE\n";

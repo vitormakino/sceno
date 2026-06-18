@@ -39,7 +39,11 @@ system. Two shared library crates + three app binaries:
   (octave-folded). A tall, fixed panel: overrides `surface_height()=220` and `stacks()=false`
   so it owns its geometry instead of joining the thin-strip stacking. UltraStar `#GAP`/`#BPM`
   are calibrated to a specific recording, so a `KaraokeConfig.offset_ms` tray nudge corrects
-  drift against arbitrary playback. `#RELATIVE` files are unsupported.
+  drift against arbitrary playback. `#RELATIVE` files are unsupported. A live
+  **accuracy score** (`score.rs`, `Scorer`) integrates `cents_to_target` over playback
+  time (golden notes ×2; partial credit `1−|cents|/50`) into a 0–100% `Pontos:` readout;
+  the per-song best (`Recorde:`) persists in `KaraokeConfig.best_scores` (keyed by
+  `TrackQuery::key`), banked on track change / disable.
 
 Each app owns a per-app data folder `~/.local/share/sceno/<app>` (`overlay::data_dir("<app>")`),
 so file kinds don't intermingle: `karaoke` reads UltraStar `.txt` from `…/sceno/karaoke`, while
