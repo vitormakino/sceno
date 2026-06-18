@@ -1,10 +1,10 @@
 use futures::channel::mpsc;
 use futures::stream::BoxStream;
-use iced::widget::{container, row, text};
+use iced::widget::{column, container, row, text};
 use iced::{Color, Element, Subscription, Task};
 use iced_layershell::to_layer_message;
 use media::player::{self, PlayerEvent};
-use media::{CueEntry, TimelineSync, TrackQuery, cue_at};
+use media::{CueEntry, TimelineSync, TrackQuery, cue_at, lines_at};
 use overlay::FontSize;
 use std::collections::HashMap;
 
@@ -22,6 +22,11 @@ const NUDGE_MS: f64 = 100.0;
 /// no lyric line is active — a heads-up of what's about to play.
 const ANNOUNCE_SECS: f64 = 5.0;
 
+/// Color of not-yet-sung words on the active line (dim white).
+const UNSUNG: Color = Color::from_rgba(1.0, 1.0, 1.0, 0.45);
+/// Color of the dimmed lookahead (next) line.
+const LOOKAHEAD: Color = Color::from_rgba(1.0, 1.0, 1.0, 0.5);
+
 // ── App types ─────────────────────────────────────────────────────────────────
 
 #[to_layer_message]
@@ -35,6 +40,8 @@ enum Message {
     NudgeOffset(f64),
     /// Drop the current song's saved sync offset.
     ClearOffset,
+    /// Toggle the dimmed lookahead (next) line.
+    SetShowNext(bool),
     TimelineTick,
 }
 
@@ -51,6 +58,8 @@ struct State {
     track_label: Option<String>,
     /// Per-song sync offsets (ms), keyed by track. Mirrors the persisted config.
     offsets: HashMap<String, f64>,
+    /// Show the upcoming line dimmed below the active one (lookahead).
+    show_next: bool,
 }
 
 impl Default for State {
@@ -66,6 +75,7 @@ impl Default for State {
             track_key: None,
             track_label: None,
             offsets: cfg.offsets,
+            show_next: cfg.show_next,
         }
     }
 }
@@ -80,7 +90,16 @@ impl State {
             .unwrap_or(0.0)
     }
 
-    /// Persist font size, enabled, and the per-song offset map.
+    /// Offset-adjusted playback time (seconds), if a sync is known. This is the
+    /// time line/word lookups are anchored to, so the per-song nudge shifts the
+    /// line selection and the word-by-word fill together.
+    fn adjusted_time(&self) -> Option<f64> {
+        self.timeline_sync
+            .as_ref()
+            .map(|s| s.current_time() + self.current_offset_ms() / 1000.0)
+    }
+
+    /// Persist font size, enabled, the per-song offset map, and lookahead toggle.
     fn persist(&self) {
         overlay::save(
             APP,
@@ -88,6 +107,7 @@ impl State {
                 font_size_idx: self.font_size.index(),
                 enabled: self.enabled,
                 offsets: self.offsets.clone(),
+                show_next: self.show_next,
             },
         );
     }
@@ -106,8 +126,7 @@ fn track_label(query: &TrackQuery) -> String {
 /// applying the song's sync offset. Falls back to the now-playing announcement
 /// during the track's intro when no lyric line is active.
 fn apply_timeline_caption(state: &mut State) {
-    if let Some(sync) = &state.timeline_sync {
-        let t = sync.current_time() + state.current_offset_ms() / 1000.0;
+    if let Some(t) = state.adjusted_time() {
         state.caption = if let Some(line) = cue_at(&state.cues, t) {
             line.to_string()
         } else if (0.0..ANNOUNCE_SECS).contains(&t) {
@@ -124,6 +143,7 @@ struct LyricsTray {
     tx: mpsc::UnboundedSender<Message>,
     enabled: bool,
     font_size: FontSize,
+    show_next: bool,
 }
 
 impl LyricsTray {
@@ -149,6 +169,16 @@ impl ksni::Tray for LyricsTray {
                 activate: Box::new(|this: &mut Self| {
                     this.enabled = !this.enabled;
                     let _ = this.tx.unbounded_send(Message::SetEnabled(this.enabled));
+                }),
+                ..Default::default()
+            }
+            .into(),
+            CheckmarkItem {
+                label: "Próxima linha".into(),
+                checked: self.show_next,
+                activate: Box::new(|this: &mut Self| {
+                    this.show_next = !this.show_next;
+                    let _ = this.tx.unbounded_send(Message::SetShowNext(this.show_next));
                 }),
                 ..Default::default()
             }
@@ -316,6 +346,10 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
                 apply_timeline_caption(state);
             }
         }
+        Message::SetShowNext(v) => {
+            state.show_next = v;
+            state.persist();
+        }
         Message::TimelineTick if state.enabled => {
             apply_timeline_caption(state);
         }
@@ -335,25 +369,57 @@ fn view(state: &State) -> Element<'_, Message> {
             .into();
     }
 
-    let mut line = row![].spacing(10).align_y(iced::Center);
-    if !state.caption.is_empty() {
-        line = line.push(
-            text(&state.caption)
-                .size(state.font_size.px())
-                .color(Color::WHITE),
-        );
-    }
-    // Evidence of the saved per-song customization: a dim "+/-NNN ms" chip.
+    let font = state.font_size.px();
+    let t = state.adjusted_time();
+    let lines = t.map(|t| lines_at(&state.cues, t)).unwrap_or_default();
+
+    // Active-line widget: word-by-word fill when the cue carries word timings,
+    // otherwise the whole caption bright (announcement and line-level lyrics).
+    let caption: Element<'_, Message> = match (t, lines.current) {
+        (Some(t), Some(cur)) if !cur.words.is_empty() && cur.text == state.caption => {
+            let sung = cur.sung_words(t);
+            let bright: String = cur.words[..sung].iter().map(|w| w.text.as_str()).collect();
+            let dim: String = cur.words[sung..].iter().map(|w| w.text.as_str()).collect();
+            let mut words = row![].spacing(0).align_y(iced::Center);
+            if !bright.is_empty() {
+                words = words.push(text(bright).size(font).color(Color::WHITE));
+            }
+            if !dim.is_empty() {
+                words = words.push(text(dim).size(font).color(UNSUNG));
+            }
+            words.into()
+        }
+        _ => text(state.caption.clone())
+            .size(font)
+            .color(Color::WHITE)
+            .into(),
+    };
+
+    // Caption + optional "+/-NNN ms" chip (evidence of the per-song customization).
+    let mut head = row![caption].spacing(10).align_y(iced::Center);
     if offset_ms != 0.0 {
-        line = line.push(
+        head = head.push(
             text(format!("⏱ {offset_ms:+.0} ms"))
-                .size((state.font_size.px() * 0.5).max(14.0))
+                .size((font * 0.5).max(14.0))
                 .color(Color::from_rgba(1.0, 0.85, 0.4, 0.9)),
         );
     }
 
+    // Lookahead: the next non-empty line, dimmed and smaller, when enabled.
+    let mut body = column![head].spacing(2).align_x(iced::Center);
+    if state.show_next
+        && !state.caption.is_empty()
+        && let Some(next) = lines.next
+    {
+        body = body.push(
+            text(next.text.clone())
+                .size((font * 0.6).max(13.0))
+                .color(LOOKAHEAD),
+        );
+    }
+
     container(
-        container(line)
+        container(body)
             .style(|_theme| container::Style {
                 background: Some(iced::Background::Color(Color::from_rgba(
                     0.0, 0.0, 0.0, 0.6,
@@ -381,6 +447,7 @@ fn event_stream() -> BoxStream<'static, Message> {
         tx: tx.clone(),
         enabled: cfg.enabled,
         font_size: FontSize::from_idx(cfg.font_size_idx),
+        show_next: cfg.show_next,
     })
     .spawn();
 
@@ -427,6 +494,7 @@ mod tests {
             track_key: None,
             track_label: None,
             offsets: HashMap::new(),
+            show_next: true,
         }
     }
 
@@ -454,16 +522,19 @@ mod tests {
                 start: 1.0,
                 end: 3.0,
                 text: "hello".into(),
+                words: Vec::new(),
             },
             CueEntry {
                 start: 3.0,
                 end: 5.0,
                 text: "world".into(),
+                words: Vec::new(),
             },
             CueEntry {
                 start: 5.0,
                 end: 7.0,
                 text: "foo".into(),
+                words: Vec::new(),
             },
         ]
     }
@@ -630,6 +701,54 @@ mod tests {
         s.offsets.insert("k".into(), 300.0);
         let _ = update(&mut s, Message::ClearOffset);
         assert!(!s.offsets.contains_key("k"));
+    }
+
+    #[test]
+    fn adjusted_time_applies_offset() {
+        let mut s = test_state();
+        s.track_key = Some("k".into());
+        s.timeline_sync = Some(paused_sync(10.0));
+        assert_eq!(s.adjusted_time(), Some(10.0));
+        // +250ms nudge advances the anchor time the word fill reads from.
+        s.offsets.insert("k".into(), 250.0);
+        assert_eq!(s.adjusted_time(), Some(10.25));
+    }
+
+    #[test]
+    fn adjusted_time_none_without_sync() {
+        let s = test_state();
+        assert_eq!(s.adjusted_time(), None);
+    }
+
+    #[test]
+    fn word_cue_fill_tracks_adjusted_time() {
+        // A word-timed line: at the offset-adjusted time, sung_words reflects how
+        // many words the fill should brighten.
+        let cue = CueEntry {
+            start: 1.0,
+            end: 5.0,
+            text: "hello world".into(),
+            words: vec![
+                media::WordTiming {
+                    start: 1.0,
+                    text: "hello ".into(),
+                },
+                media::WordTiming {
+                    start: 3.0,
+                    text: "world".into(),
+                },
+            ],
+        };
+        let mut s = test_state();
+        s.track_key = Some("k".into());
+        s.cues = vec![cue];
+        s.timeline_sync = Some(paused_sync(2.0)); // between the two word onsets
+        let t = s.adjusted_time().unwrap();
+        assert_eq!(s.cues[0].sung_words(t), 1);
+        // Nudge forward 1.5s → t=3.5, both words now sung.
+        s.offsets.insert("k".into(), 1500.0);
+        let t = s.adjusted_time().unwrap();
+        assert_eq!(s.cues[0].sung_words(t), 2);
     }
 
     #[test]
