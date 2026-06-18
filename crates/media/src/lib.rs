@@ -8,7 +8,7 @@ pub mod player;
 pub mod sync;
 pub mod ultrastar;
 
-pub use cue::{CueEntry, cue_at};
+pub use cue::{ActiveLines, CueEntry, WordTiming, cue_at, lines_at};
 pub use library::{LibraryEntry, Song};
 pub use lrclib::TrackQuery;
 pub use player::PlayerEvent;
