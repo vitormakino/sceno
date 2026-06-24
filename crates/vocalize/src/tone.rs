@@ -20,23 +20,34 @@ const GAIN: f32 = 0.25;
 /// Attack / release ramp (s), to avoid clicks.
 const RAMP_SECS: f64 = 0.012;
 
-/// Handle to the tone player. Cheap to clone (two `Arc`s).
+/// Handle to the tone player. Cheap to clone (two `Arc`s + a flag).
 #[derive(Clone)]
 pub struct Tone {
     pending: Arc<Mutex<Option<Vec<f64>>>>,
     audible: Arc<AtomicBool>,
+    /// Whether an output device was present at startup. When false, [`Tone::play`]
+    /// is a no-op returning `Duration::ZERO`, so the caller never gates listening
+    /// on a tone that will never sound (e.g. a headless / no-audio session). The
+    /// probe is synchronous, so it is settled before the first `play` call — unlike
+    /// the output thread, which finishes building the stream a few ms later.
+    playable: bool,
 }
 
 impl Tone {
-    /// Spawn the output thread and return a handle. Degrades to a silent handle if
-    /// no output device is available (requests are simply never rendered).
+    /// Probe for an output device and (if present) spawn the output thread, returning
+    /// a handle. With no output device the handle is silent: `play` renders nothing
+    /// and reports zero duration.
     pub fn new(audible: bool) -> Tone {
+        let playable = cpal::default_host().default_output_device().is_some();
         let pending: Arc<Mutex<Option<Vec<f64>>>> = Arc::new(Mutex::new(None));
         let p = pending.clone();
-        std::thread::spawn(move || run_output(p));
+        if playable {
+            std::thread::spawn(move || run_output(p));
+        }
         Tone {
             pending,
             audible: Arc::new(AtomicBool::new(audible)),
+            playable,
         }
     }
 
@@ -46,9 +57,10 @@ impl Tone {
 
     /// Queue a tone (one freq = sustained note; many = arpejo). Returns the total
     /// planned playback duration so the caller can gate listening until it ends.
-    /// When muted, plays nothing and returns `Duration::ZERO` (listen immediately).
+    /// When muted or with no output device, plays nothing and returns
+    /// `Duration::ZERO` (listen immediately).
     pub fn play(&self, freqs: &[f64]) -> Duration {
-        if !self.audible.load(Ordering::Relaxed) || freqs.is_empty() {
+        if !self.playable || !self.audible.load(Ordering::Relaxed) || freqs.is_empty() {
             return Duration::ZERO;
         }
         let secs = if freqs.len() == 1 {
