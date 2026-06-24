@@ -56,6 +56,17 @@ system. Three shared library crates + four app binaries:
   (`beat::run_detect`, a *gated subscription* `detect_stream` that runs only while Detect is
   selected — dropping the subscription drops the sink so the capture thread exits). **Som** and
   **Flash** toggle the audible click and the visual `Beats` dot-row (`meter.rs`) independently.
+- **`vocalize`** (bin) — call-and-response ear/voice trainer via `pitch`: plays + shows a
+  target note or chord and only advances once the user sings it. Pure exercise logic
+  (`exercise.rs`: `Scale`/`ScaleKind`/`Mode`, `item_at`, the octave-folded `Matcher`,
+  `note_label`) is unit-tested; `tone.rs` renders the reference tone on demand off a cpal
+  **output** stream (the `beat::click` sine pattern, queued not clock-driven; a chord plays as
+  a short arpejo). A tall fixed panel (`surface_height()=160`, `stacks()=false`) shows the
+  target as solfège+letter chips (`Dó (C)`) that turn green as each note is collected; the
+  matcher is gated off while the tone sounds so mic bleed can't auto-pass. A 33 ms gated tick
+  drives sustain timing + the success flash. `VocalizeConfig { enabled, audible, scale_root,
+  scale_kind_idx, mode_idx, cents_window, sustain_ms }` persists the tray choices (Tonalidade,
+  Escala, Modo, Tolerância, Sustentação, Som, Repetir tom).
 
 Each app owns a per-app data folder `~/.local/share/sceno/<app>` (`overlay::data_dir("<app>")`),
 so file kinds don't intermingle: `karaoke` and `metronome` read UltraStar `.txt` from

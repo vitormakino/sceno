@@ -19,6 +19,9 @@ app — each app is its own small binary.
   lock it to the playing song's UltraStar `#BPM`/`#GAP` grid, or detect the
   tempo live from the system audio. Marks the beat with an audible click and a
   visual flash, each toggleable independently.
+- **`vocalize`** — a singing ear trainer. Plays + shows a note or chord; waits
+  for you to sing it before advancing. Adjustable scale, mode (notes/chords),
+  tolerance, and sustain from the tray.
 
 ## Building
 
@@ -31,7 +34,7 @@ sudo apt-get install libdbus-1-dev libasound2-dev libwayland-dev libxkbcommon-de
 ```
 
 - `libdbus-1-dev` — MPRIS (lyrics, karaoke, metronome)
-- `libasound2-dev` — ALSA capture/playback via cpal (tuner, karaoke, metronome)
+- `libasound2-dev` — ALSA capture/playback via cpal (tuner, karaoke, metronome, vocalize)
 - `libwayland-dev`, `libxkbcommon-dev` — the Wayland layer-shell stack
 
 ```sh
@@ -39,7 +42,8 @@ cargo build --release
 ./target/release/lyrics      # or
 ./target/release/tuner       # or
 ./target/release/karaoke     # or
-./target/release/metronome
+./target/release/metronome   # or
+./target/release/vocalize
 ```
 
 The overlays are Wayland layer-shell surfaces and require a Wayland compositor
