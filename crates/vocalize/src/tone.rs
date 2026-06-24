@@ -181,7 +181,7 @@ impl ToneSynth {
         } else {
             ARP_SECS
         };
-        let total = (self.sr * secs) as usize;
+        let total = (self.sr * secs).max(1.0) as usize;
         for &freq in freqs {
             self.queue.push_back(Seg { freq, total });
         }

@@ -86,7 +86,11 @@ impl Default for State {
         let item = exercise::item_at(&scale, mode, degree);
         let matcher = Matcher::new(&item, cents_window, sustain_ms);
         let tone = tone::Tone::new(cfg.audible);
-        let present = tone.play(&freqs_of(&item));
+        let present = if cfg.enabled {
+            tone.play(&freqs_of(&item))
+        } else {
+            std::time::Duration::ZERO
+        };
         State {
             enabled: cfg.enabled,
             scale,
@@ -153,7 +157,11 @@ impl State {
         self.prev_degree = degree;
         self.item = exercise::item_at(&self.scale, self.mode, degree);
         self.matcher = Matcher::new(&self.item, self.cents_window, self.sustain_ms);
-        let present = self.tone.play(&freqs_of(&self.item));
+        let present = if self.enabled {
+            self.tone.play(&freqs_of(&self.item))
+        } else {
+            Duration::ZERO
+        };
         self.present_until = Some(Instant::now() + present);
     }
 
@@ -196,6 +204,7 @@ impl overlay::OverlayApp for State {
         match message {
             Message::SetEnabled(on) => {
                 self.enabled = on;
+                self.last_tick = Instant::now();
                 self.persist();
             }
             Message::PitchUpdate(freq) => {
@@ -255,7 +264,7 @@ impl overlay::OverlayApp for State {
                 self.persist();
                 self.reset();
             }
-            Message::Replay => {
+            Message::Replay if self.enabled => {
                 let present = self.tone.play(&freqs_of(&self.item));
                 self.present_until = Some(Instant::now() + present);
             }

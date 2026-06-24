@@ -7,7 +7,7 @@ Guidance for working in the **sceno** repo. See `README.md` for user-facing docs
 
 A Cargo workspace (`members = ["crates/*"]`, edition 2024) of minimal Wayland
 **layer-shell** overlay apps. Each app is its own small binary; they are *not* a plugin
-system. Three shared library crates + four app binaries:
+system. Four shared library crates + five app binaries:
 
 - **`overlay`** (lib) — the shared shell. The `OverlayApp` trait (`namespace`, `update`,
   `view`, `subscription`, + default-implemented surface geometry: `surface_height`, `anchor`,
@@ -19,7 +19,7 @@ system. Three shared library crates + four app binaries:
   `note_to_frequency`, `is_in_tune`, `Note` with a `midi` field), `smooth` (`Smoother`),
   `detect_frequency` (McLeod/MPM), `capture::run_capture` (cpal stream + 50 ms loop, calls a
   `sink(Option<Note>) -> bool` that returns `false` to stop), and `cents_color` (→ `[f32;3]`).
-  Used by `tuner` and `karaoke`.
+  Used by `tuner`, `karaoke`, and `vocalize`.
 - **`media`** (lib) — now-playing + lyrics sources: `player` (MPRIS loop delivering a neutral
   `PlayerEvent` to a `sink(PlayerEvent) -> bool`), `sync::TimelineSync`, `cue` (`CueEntry` +
   `cue_at`), `lrc`/`lrclib` (LRCLIB fetch + on-disk store), `ultrastar` (`.txt`
