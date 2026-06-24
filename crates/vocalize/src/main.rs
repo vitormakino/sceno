@@ -7,6 +7,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 mod config;
 mod exercise;
+mod tone;
 mod tray;
 use config::VocalizeConfig;
 use exercise::{Matcher, Mode, Scale, ScaleKind};
@@ -48,6 +49,11 @@ struct State {
     last_tick: Instant,
     /// While `Some` and not yet elapsed, the success flash is showing.
     success_until: Option<Instant>,
+    audible: bool,
+    tone: tone::Tone,
+    /// While `Some` and not elapsed, the reference tone is playing and the matcher
+    /// is disabled (so the mic can't auto-pass on the tone bleeding in).
+    present_until: Option<Instant>,
 }
 
 impl Default for State {
@@ -64,6 +70,8 @@ impl Default for State {
         let degree = next_degree(&mut rng, scale.degree_count(), usize::MAX);
         let item = exercise::item_at(&scale, mode, degree);
         let matcher = Matcher::new(&item, cents_window, sustain_ms);
+        let tone = tone::Tone::new(cfg.audible);
+        let present = tone.play(&freqs_of(&item));
         State {
             enabled: cfg.enabled,
             scale,
@@ -78,6 +86,9 @@ impl Default for State {
             sung_note: None,
             last_tick: Instant::now(),
             success_until: None,
+            audible: cfg.audible,
+            tone,
+            present_until: Some(Instant::now() + present),
         }
     }
 }
@@ -113,6 +124,13 @@ fn next_degree(s: &mut u64, count: usize, prev: usize) -> usize {
     d
 }
 
+/// Playback frequencies (Hz) for the item's MIDI notes, at A440.
+fn freqs_of(item: &[i64]) -> Vec<f64> {
+    item.iter()
+        .map(|&m| pitch::note_to_frequency(m as f64, pitch::A4))
+        .collect()
+}
+
 impl State {
     /// Move to a fresh random item and rebuild the matcher.
     fn advance(&mut self) {
@@ -120,6 +138,8 @@ impl State {
         self.prev_degree = degree;
         self.item = exercise::item_at(&self.scale, self.mode, degree);
         self.matcher = Matcher::new(&self.item, self.cents_window, self.sustain_ms);
+        let present = self.tone.play(&freqs_of(&self.item));
+        self.present_until = Some(Instant::now() + present);
     }
 
     fn persist(&self) {
@@ -127,7 +147,7 @@ impl State {
             APP,
             &VocalizeConfig {
                 enabled: self.enabled,
-                audible: true,
+                audible: self.audible,
                 scale_root: self.scale.root,
                 scale_kind_idx: self.scale.kind.index(),
                 mode_idx: self.mode.index(),
@@ -173,6 +193,12 @@ impl overlay::OverlayApp for State {
                     }
                     return Task::none();
                 }
+                if let Some(t) = self.present_until {
+                    if now < t {
+                        return Task::none();
+                    }
+                    self.present_until = None;
+                }
                 let newly = self.matcher.update(self.sung, dt);
                 if !newly.is_empty() && self.matcher.all_collected() {
                     self.success_until = Some(now + FLASH);
@@ -203,7 +229,13 @@ impl overlay::OverlayApp for State {
             };
             chips = chips.push(text(exercise::note_label(m)).size(34.0).color(color));
         }
-        let prompt = if flashing { "Acertou!" } else { "Cante:" };
+        let prompt = if flashing {
+            "Acertou!"
+        } else if self.present_until.is_some() {
+            "Ouça…"
+        } else {
+            "Cante:"
+        };
         let (you_label, you_color) = match self.sung_note {
             Some(n) => (
                 format!("Você: {}{} {:+.0}¢", n.name, n.octave, n.cents),
