@@ -20,10 +20,25 @@ const SURFACE_H: u32 = 160;
 /// How long the "Acertou!" success flash shows before the next item.
 const FLASH: Duration = Duration::from_millis(450);
 
+/// Selectable scale roots (MIDI pitch classes 0–11), for the tray.
+pub const ROOTS: [i64; 12] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+/// Selectable cents-window steps.
+pub const CENTS_STEPS: [f64; 3] = [25.0, 50.0, 75.0];
+/// Selectable sustain-time steps (ms).
+pub const SUSTAIN_STEPS: [f64; 3] = [300.0, 500.0, 800.0];
+
 #[to_layer_message]
 #[derive(Debug, Clone)]
 enum Message {
     SetEnabled(bool),
+    SetAudible(bool),
+    SetRoot(i64),
+    SetScaleKind(exercise::ScaleKind),
+    SetMode(exercise::Mode),
+    SetCents(f64),
+    SetSustain(f64),
+    /// Replay the current item's reference tone.
+    Replay,
     /// Smoothed fundamental frequency (Hz) from the mic, or `None` on silence.
     PitchUpdate(Option<f64>),
     /// 33 ms UI tick driving listen/sustain timing and the success flash.
@@ -142,6 +157,11 @@ impl State {
         self.present_until = Some(Instant::now() + present);
     }
 
+    /// Apply a settings change by starting a fresh item under the new settings.
+    fn reset(&mut self) {
+        self.advance();
+    }
+
     fn persist(&self) {
         overlay::save(
             APP,
@@ -203,6 +223,41 @@ impl overlay::OverlayApp for State {
                 if !newly.is_empty() && self.matcher.all_collected() {
                     self.success_until = Some(now + FLASH);
                 }
+            }
+            Message::SetAudible(on) => {
+                self.audible = on;
+                self.tone.set_audible(on);
+                self.persist();
+            }
+            Message::SetRoot(r) => {
+                self.scale.root = r;
+                self.persist();
+                self.reset();
+            }
+            Message::SetScaleKind(k) => {
+                self.scale.kind = k;
+                self.prev_degree = usize::MAX;
+                self.persist();
+                self.reset();
+            }
+            Message::SetMode(m) => {
+                self.mode = m;
+                self.persist();
+                self.reset();
+            }
+            Message::SetCents(c) => {
+                self.cents_window = c;
+                self.persist();
+                self.reset();
+            }
+            Message::SetSustain(ms) => {
+                self.sustain_ms = ms;
+                self.persist();
+                self.reset();
+            }
+            Message::Replay => {
+                let present = self.tone.play(&freqs_of(&self.item));
+                self.present_until = Some(Instant::now() + present);
             }
             _ => {}
         }
@@ -287,6 +342,12 @@ fn event_stream() -> BoxStream<'static, Message> {
     ksni::TrayService::new(tray::VocalizeTray {
         tx: tx.clone(),
         enabled: cfg.enabled,
+        audible: cfg.audible,
+        scale_root: cfg.scale_root,
+        scale_kind: ScaleKind::from_idx(cfg.scale_kind_idx),
+        mode: Mode::from_idx(cfg.mode_idx),
+        cents_window: cfg.cents_window,
+        sustain_ms: cfg.sustain_ms as f64,
     })
     .spawn();
     std::thread::spawn(move || {
