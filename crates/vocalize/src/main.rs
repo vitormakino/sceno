@@ -1,12 +1,14 @@
 use futures::channel::mpsc;
 use futures::stream::BoxStream;
-use iced::widget::{container, text};
-use iced::{Element, Subscription, Task};
+use iced::widget::{column, container, row, text};
+use iced::{Color, Element, Subscription, Task};
 use iced_layershell::to_layer_message;
 
 mod config;
+mod exercise;
 mod tray;
 use config::VocalizeConfig;
+use exercise::{Mode, Scale, ScaleKind};
 
 /// App name: Wayland namespace, single-instance lock, config dir.
 const APP: &str = "vocalize";
@@ -21,13 +23,26 @@ enum Message {
 
 struct State {
     enabled: bool,
+    scale: Scale,
+    mode: Mode,
+    /// Target MIDI notes of the current item (playback octave).
+    item: Vec<i64>,
 }
 
 impl Default for State {
     fn default() -> Self {
         let cfg: VocalizeConfig = overlay::load_config(APP);
+        let scale = Scale {
+            root: cfg.scale_root,
+            kind: ScaleKind::from_idx(cfg.scale_kind_idx),
+        };
+        let mode = Mode::from_idx(cfg.mode_idx);
+        let item = exercise::item_at(&scale, mode, 0);
         State {
             enabled: cfg.enabled,
+            scale,
+            mode,
+            item,
         }
     }
 }
@@ -38,6 +53,10 @@ impl State {
             APP,
             &VocalizeConfig {
                 enabled: self.enabled,
+                audible: true,
+                scale_root: self.scale.root,
+                scale_kind_idx: self.scale.kind.index(),
+                mode_idx: self.mode.index(),
                 ..Default::default()
             },
         );
@@ -66,15 +85,42 @@ impl overlay::OverlayApp for State {
         Task::none()
     }
     fn view(&self) -> Element<'_, Message> {
-        let body = if self.enabled {
-            text("vocalize")
-        } else {
-            text("")
+        let empty = || {
+            container(text(""))
+                .center_x(iced::Fill)
+                .center_y(iced::Fill)
         };
-        container(body)
-            .center_x(iced::Fill)
-            .center_y(iced::Fill)
-            .into()
+        if !self.enabled {
+            return empty().into();
+        }
+        let mut chips = row![].spacing(12);
+        for &m in &self.item {
+            chips = chips.push(
+                text(exercise::note_label(m))
+                    .size(34.0)
+                    .color(Color::from_rgba(1.0, 1.0, 1.0, 0.85)),
+            );
+        }
+        let body = column![text("Cante:").size(18.0).color(Color::WHITE), chips]
+            .align_x(iced::Center)
+            .spacing(8);
+        container(
+            container(body)
+                .padding([10, 18])
+                .style(|_theme| container::Style {
+                    background: Some(iced::Background::Color(Color::from_rgba(
+                        0.0, 0.0, 0.0, 0.55,
+                    ))),
+                    border: iced::Border {
+                        radius: 12.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+        )
+        .center_x(iced::Fill)
+        .center_y(iced::Fill)
+        .into()
     }
     fn subscription(&self) -> Subscription<Message> {
         Subscription::run(event_stream)
