@@ -1,0 +1,21 @@
+[package]
+name = "vocalize"
+description = "Call-and-response ear/voice trainer overlay: sing the played note to advance."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+overlay = { path = "../overlay" }
+pitch = { path = "../pitch" }
+iced = { workspace = true }
+iced_layershell.workspace = true
+futures.workspace = true
+serde.workspace = true
+ksni.workspace = true
+cpal = "0.15"
+
+[dev-dependencies]
+serde_json.workspace = true

@@ -1,0 +1,88 @@
+//! Persisted vocalize settings, stored as JSON via `overlay`.
+
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize)]
+pub struct VocalizeConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Whether the reference tone is played aloud.
+    #[serde(default = "default_true")]
+    pub audible: bool,
+    /// Scale root as a MIDI pitch class (0 = C … 11 = B).
+    #[serde(default)]
+    pub scale_root: i64,
+    /// Scale kind index; see [`crate::exercise::ScaleKind`].
+    #[serde(default)]
+    pub scale_kind_idx: usize,
+    /// Exercise mode index; see [`crate::exercise::Mode`].
+    #[serde(default)]
+    pub mode_idx: usize,
+    /// Half-width of the in-tune window, in cents.
+    #[serde(default = "default_cents")]
+    pub cents_window: f64,
+    /// How long the pitch must be held in-window to count, in ms.
+    #[serde(default = "default_sustain")]
+    pub sustain_ms: u64,
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_cents() -> f64 {
+    50.0
+}
+fn default_sustain() -> u64 {
+    500
+}
+
+impl Default for VocalizeConfig {
+    fn default() -> Self {
+        VocalizeConfig {
+            enabled: true,
+            audible: true,
+            scale_root: 0,
+            scale_kind_idx: 0,
+            mode_idx: 0,
+            cents_window: 50.0,
+            sustain_ms: 500,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn roundtrips_json() {
+        let cfg = VocalizeConfig {
+            enabled: false,
+            audible: false,
+            scale_root: 9,
+            scale_kind_idx: 1,
+            mode_idx: 1,
+            cents_window: 25.0,
+            sustain_ms: 800,
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let loaded: VocalizeConfig = serde_json::from_str(&json).unwrap();
+        assert!(!loaded.enabled);
+        assert!(!loaded.audible);
+        assert_eq!(loaded.scale_root, 9);
+        assert_eq!(loaded.scale_kind_idx, 1);
+        assert_eq!(loaded.mode_idx, 1);
+        assert_eq!(loaded.cents_window, 25.0);
+        assert_eq!(loaded.sustain_ms, 800);
+    }
+
+    #[test]
+    fn missing_fields_use_defaults() {
+        let cfg: VocalizeConfig = serde_json::from_str("{}").unwrap();
+        assert!(cfg.enabled);
+        assert!(cfg.audible);
+        assert_eq!(cfg.scale_root, 0);
+        assert_eq!(cfg.cents_window, 50.0);
+        assert_eq!(cfg.sustain_ms, 500);
+    }
+}

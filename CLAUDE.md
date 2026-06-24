@@ -7,7 +7,7 @@ Guidance for working in the **sceno** repo. See `README.md` for user-facing docs
 
 A Cargo workspace (`members = ["crates/*"]`, edition 2024) of minimal Wayland
 **layer-shell** overlay apps. Each app is its own small binary; they are *not* a plugin
-system. Two shared library crates + three app binaries:
+system. Three shared library crates + four app binaries:
 
 - **`overlay`** (lib) — the shared shell. The `OverlayApp` trait (`namespace`, `update`,
   `view`, `subscription`, + default-implemented surface geometry: `surface_height`, `anchor`,
@@ -23,8 +23,14 @@ system. Two shared library crates + three app binaries:
 - **`media`** (lib) — now-playing + lyrics sources: `player` (MPRIS loop delivering a neutral
   `PlayerEvent` to a `sink(PlayerEvent) -> bool`), `sync::TimelineSync`, `cue` (`CueEntry` +
   `cue_at`), `lrc`/`lrclib` (LRCLIB fetch + on-disk store), `ultrastar` (`.txt`
-  parser), and `library` (scan a folder, match by normalized artist/title). Used by `lyrics`
-  and `karaoke`.
+  parser), and `library` (scan a folder, match by normalized artist/title). Used by `lyrics`,
+  `karaoke`, and `metronome`.
+- **`beat`** (lib) — metronome timing + signal: `clock` (`SharedClock`, an atomic-backed
+  tempo + downbeat-phase anchor shared across threads; `beat_position_at`, `rephase`,
+  `anchor_to`, `tap_bpm`), `click` (`run_click` — a cpal **output** stream that renders
+  sample-accurate accented clicks off the shared clock, gated on `running && audible`), and
+  `detect` (`run_detect` — best-effort tempo estimation from the system-audio **monitor** via
+  energy-flux onsets + autocorrelation; pure-Rust, no aubio/C deps). Used by `metronome`.
 - **`lyrics`** (bin) — synced caption overlay via `media` (MPRIS + LRCLIB). Owns its `SavedConfig`.
   Announces the now-playing title (`♪ Artist — Title`) during the first `ANNOUNCE_SECS` of a
   track while no lyric line is active. A per-song sync nudge corrects drift against arbitrary
@@ -40,9 +46,20 @@ system. Two shared library crates + three app binaries:
   so it owns its geometry instead of joining the thin-strip stacking. UltraStar `#GAP`/`#BPM`
   are calibrated to a specific recording, so a `KaraokeConfig.offset_ms` tray nudge corrects
   drift against arbitrary playback. `#RELATIVE` files are unsupported.
+- **`metronome`** (bin) — beat overlay via `beat` (+ `media` for song sync). One `SharedClock`
+  is the single source of truth read by both the audio click thread and the visual flash, so
+  they never drift; it lives in a process-global `OnceLock` so the click thread (spawned in the
+  subscription's `event_stream`) and the UI `State` share it. Three tempo `Source`s (tray
+  **Fonte** submenu): **Manual** (tray ± / **Tap tempo**, which sets `manual_bpm` and anchors
+  the tapped beat), **Song** (locks `#BPM`/`#GAP` of a matched UltraStar `.txt` to
+  `TimelineSync` position, with a per-song `offsets` nudge like `lyrics`), and **Detect**
+  (`beat::run_detect`, a *gated subscription* `detect_stream` that runs only while Detect is
+  selected — dropping the subscription drops the sink so the capture thread exits). **Som** and
+  **Flash** toggle the audible click and the visual `Beats` dot-row (`meter.rs`) independently.
 
 Each app owns a per-app data folder `~/.local/share/sceno/<app>` (`overlay::data_dir("<app>")`),
-so file kinds don't intermingle: `karaoke` reads UltraStar `.txt` from `…/sceno/karaoke`, while
+so file kinds don't intermingle: `karaoke` and `metronome` read UltraStar `.txt` from
+`…/sceno/karaoke` and `…/sceno/metronome` respectively, while
 `lyrics` persists LRCLIB hits as `Artist - Title.lrc` into `…/sceno/lyrics` — that single
 human-named file is both the re-download guard and a browsable copy (there is no separate hash
 cache under `~/.cache`).
