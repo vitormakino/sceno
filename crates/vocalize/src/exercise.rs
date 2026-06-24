@@ -121,6 +121,72 @@ pub fn note_label(midi: i64) -> String {
     format!("{} ({})", SOLFEGE[midi.rem_euclid(12) as usize], letter)
 }
 
+/// Tracks how long each still-uncollected target has been sung in-tune and reports
+/// targets as "collected" once held for the sustain time. Matching is octave-folded:
+/// only the pitch class matters.
+pub struct Matcher {
+    classes: Vec<i64>,
+    held_ms: Vec<f64>,
+    collected: Vec<bool>,
+    cents_window: f64,
+    sustain_ms: f64,
+}
+
+impl Matcher {
+    pub fn new(item: &[i64], cents_window: f64, sustain_ms: f64) -> Self {
+        let classes: Vec<i64> = item.iter().map(|m| m.rem_euclid(12)).collect();
+        let len = classes.len();
+        Matcher {
+            classes,
+            held_ms: vec![0.0; len],
+            collected: vec![false; len],
+            cents_window,
+            sustain_ms,
+        }
+    }
+
+    /// Feed one analysis frame. `sung` is a continuous MIDI value (note + cents/100)
+    /// or `None` on silence; `dt_ms` is the time since the previous frame. Returns
+    /// the indices that became collected on this frame.
+    pub fn update(&mut self, sung: Option<f64>, dt_ms: f64) -> Vec<usize> {
+        let mut newly = Vec::new();
+        for i in 0..self.classes.len() {
+            if self.collected[i] {
+                continue;
+            }
+            let in_window = sung
+                .map(|p| cents_from_class(p, self.classes[i]).abs() <= self.cents_window)
+                .unwrap_or(false);
+            if in_window {
+                self.held_ms[i] += dt_ms;
+                if self.held_ms[i] >= self.sustain_ms {
+                    self.collected[i] = true;
+                    newly.push(i);
+                }
+            } else {
+                self.held_ms[i] = 0.0;
+            }
+        }
+        newly
+    }
+
+    pub fn collected(&self) -> &[bool] {
+        &self.collected
+    }
+    pub fn all_collected(&self) -> bool {
+        self.collected.iter().all(|&c| c)
+    }
+}
+
+/// Signed cents from a continuous MIDI pitch to the nearest octave of `class` (0–11).
+fn cents_from_class(sung_midi: f64, class: i64) -> f64 {
+    let mut diff = (sung_midi - class as f64).rem_euclid(12.0); // 0..12
+    if diff > 6.0 {
+        diff -= 12.0;
+    }
+    diff * 100.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,5 +267,62 @@ mod tests {
         assert_eq!(note_label(60), "Dó (C)");
         assert_eq!(note_label(69), "Lá (A)");
         assert_eq!(note_label(61), "Dó# (C#)");
+    }
+
+    #[test]
+    fn cents_from_class_signs() {
+        assert!((cents_from_class(60.2, 0) - 20.0).abs() < 1e-6);
+        assert!((cents_from_class(59.8, 0) + 20.0).abs() < 1e-6);
+        // A tritone away is the max distance (±600¢).
+        assert!((cents_from_class(66.0, 0).abs() - 600.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn collects_after_sustain() {
+        let mut m = Matcher::new(&[60], 50.0, 500.0);
+        for _ in 0..4 {
+            assert!(m.update(Some(60.0), 100.0).is_empty());
+        }
+        assert_eq!(m.update(Some(60.0), 100.0), vec![0]); // 500ms reached
+        assert!(m.all_collected());
+        // Already collected → never returned again.
+        assert!(m.update(Some(60.0), 100.0).is_empty());
+    }
+
+    #[test]
+    fn out_of_window_resets_hold() {
+        let mut m = Matcher::new(&[60], 50.0, 500.0);
+        m.update(Some(60.0), 300.0);
+        m.update(Some(63.0), 100.0); // 3 semitones off → resets
+        // Now needs a full 500ms again.
+        for _ in 0..4 {
+            assert!(m.update(Some(60.0), 100.0).is_empty());
+        }
+        assert_eq!(m.update(Some(60.0), 100.0), vec![0]);
+    }
+
+    #[test]
+    fn silence_resets_hold() {
+        let mut m = Matcher::new(&[60], 50.0, 500.0);
+        m.update(Some(60.0), 300.0);
+        m.update(None, 100.0);
+        assert!(!m.all_collected());
+    }
+
+    #[test]
+    fn matching_is_octave_folded() {
+        let mut m = Matcher::new(&[60], 50.0, 500.0); // target C
+        // Singing C an octave up (72) still matches the pitch class.
+        assert_eq!(m.update(Some(72.0), 500.0), vec![0]);
+    }
+
+    #[test]
+    fn chord_collects_each_target_independently() {
+        let mut m = Matcher::new(&[60, 64, 67], 50.0, 100.0); // C E G
+        assert_eq!(m.update(Some(64.0), 100.0), vec![1]); // sing E
+        assert_eq!(m.update(Some(60.0), 100.0), vec![0]); // sing C
+        assert!(!m.all_collected());
+        assert_eq!(m.update(Some(67.0), 100.0), vec![2]); // sing G
+        assert!(m.all_collected());
     }
 }
