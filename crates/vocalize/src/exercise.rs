@@ -46,32 +46,69 @@ impl ScaleKind {
     ];
 }
 
-/// Exercise mode. Indices stable (persisted).
+/// Exercise mode: how many/which notes make up each item. Indices stable (persisted).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Notes,
-    Chords,
+    PowerChord,
+    Triad,
+    Tetrad,
 }
 impl Mode {
     pub fn index(self) -> usize {
         match self {
             Mode::Notes => 0,
-            Mode::Chords => 1,
+            Mode::PowerChord => 1,
+            Mode::Triad => 2,
+            Mode::Tetrad => 3,
         }
     }
     pub fn from_idx(i: usize) -> Self {
         match i {
-            1 => Mode::Chords,
+            1 => Mode::PowerChord,
+            2 => Mode::Triad,
+            3 => Mode::Tetrad,
             _ => Mode::Notes,
         }
     }
     pub fn label(self) -> &'static str {
         match self {
             Mode::Notes => "Notas",
-            Mode::Chords => "Acordes",
+            Mode::PowerChord => "Power chord",
+            Mode::Triad => "Tríade",
+            Mode::Tetrad => "Tétrade",
         }
     }
-    pub const ALL: [Mode; 2] = [Mode::Notes, Mode::Chords];
+    pub const ALL: [Mode; 4] = [Mode::Notes, Mode::PowerChord, Mode::Triad, Mode::Tetrad];
+}
+
+/// How a chord's reference tone is played: all notes at once, or one after another.
+/// Indices stable (persisted). Single-note items ignore this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlayStyle {
+    Together,
+    Arpeggio,
+}
+impl PlayStyle {
+    pub fn index(self) -> usize {
+        match self {
+            PlayStyle::Together => 0,
+            PlayStyle::Arpeggio => 1,
+        }
+    }
+    pub fn from_idx(i: usize) -> Self {
+        match i {
+            1 => PlayStyle::Arpeggio,
+            _ => PlayStyle::Together,
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            PlayStyle::Together => "Junto",
+            PlayStyle::Arpeggio => "Arpejo",
+        }
+    }
+    pub const ALL: [PlayStyle; 2] = [PlayStyle::Together, PlayStyle::Arpeggio];
 }
 
 /// A scale: a root pitch class (0–11) and a kind.
@@ -92,12 +129,18 @@ impl Scale {
     }
 }
 
-/// Build the exercise item for a chosen scale-degree index.
+/// Build the exercise item (the MIDI notes to sing) for a chosen scale-degree index.
 ///
-/// `Mode::Notes` returns one MIDI note; `Mode::Chords` returns a three-note triad
-/// stacked from that degree (scale degrees `d`, `d+2`, `d+4`, wrapping upward by an
-/// octave so the notes ascend). All MIDI numbers are relative to the scale root in
-/// the playback octave ([`Scale::octave_root_midi`]).
+/// All notes are relative to the scale root in the playback octave
+/// ([`Scale::octave_root_midi`]). Chord shapes other than the power chord are built from
+/// scale degrees `d`, `d+2`, … (every other step), wrapping upward by an octave so the
+/// notes ascend:
+/// - [`Mode::Notes`] — one note, `at(d)`.
+/// - [`Mode::PowerChord`] — root + a *perfect* fifth, `[at(d), at(d) + 7]`. The fifth is an
+///   absolute 7-semitone interval (not a scale degree), so it stays perfect on every degree
+///   and scale — the defining trait of a power chord.
+/// - [`Mode::Triad`] — `[at(d), at(d+2), at(d+4)]` (diatonic triad).
+/// - [`Mode::Tetrad`] — `[at(d), at(d+2), at(d+4), at(d+6)]` (diatonic seventh chord).
 pub fn item_at(scale: &Scale, mode: Mode, degree: usize) -> Vec<i64> {
     let degs = scale.kind.degrees();
     let n = degs.len();
@@ -106,7 +149,9 @@ pub fn item_at(scale: &Scale, mode: Mode, degree: usize) -> Vec<i64> {
     let d = degree % n;
     match mode {
         Mode::Notes => vec![at(d)],
-        Mode::Chords => vec![at(d), at(d + 2), at(d + 4)],
+        Mode::PowerChord => vec![at(d), at(d) + 7],
+        Mode::Triad => vec![at(d), at(d + 2), at(d + 4)],
+        Mode::Tetrad => vec![at(d), at(d + 2), at(d + 4), at(d + 6)],
     }
 }
 
@@ -249,8 +294,8 @@ mod tests {
             root: 0,
             kind: ScaleKind::Major,
         };
-        assert_eq!(item_at(&s, Mode::Chords, 0), vec![60, 64, 67]); // C E G
-        assert_eq!(item_at(&s, Mode::Chords, 1), vec![62, 65, 69]); // D F A
+        assert_eq!(item_at(&s, Mode::Triad, 0), vec![60, 64, 67]); // C E G
+        assert_eq!(item_at(&s, Mode::Triad, 1), vec![62, 65, 69]); // D F A
     }
 
     #[test]
@@ -259,7 +304,30 @@ mod tests {
             root: 9,
             kind: ScaleKind::NaturalMinor,
         };
-        assert_eq!(item_at(&s, Mode::Chords, 0), vec![69, 72, 76]); // A C E
+        assert_eq!(item_at(&s, Mode::Triad, 0), vec![69, 72, 76]); // A C E
+    }
+
+    #[test]
+    fn power_chord_is_perfect_fifth() {
+        let s = Scale {
+            root: 0,
+            kind: ScaleKind::Major,
+        };
+        // C major, root: C + perfect fifth G.
+        assert_eq!(item_at(&s, Mode::PowerChord, 0), vec![60, 67]);
+        // Leading-tone degree (B): an absolute perfect fifth (B + F#), NOT the diatonic
+        // diminished fifth (B + F) — this is what makes it a power chord.
+        assert_eq!(item_at(&s, Mode::PowerChord, 6), vec![71, 78]);
+    }
+
+    #[test]
+    fn tetrad_stacks_seventh() {
+        let s = Scale {
+            root: 0,
+            kind: ScaleKind::Major,
+        };
+        // C major degree 0 → Cmaj7 (C E G B).
+        assert_eq!(item_at(&s, Mode::Tetrad, 0), vec![60, 64, 67, 71]);
     }
 
     #[test]

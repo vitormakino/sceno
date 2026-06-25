@@ -10,7 +10,7 @@ mod exercise;
 mod tone;
 mod tray;
 use config::VocalizeConfig;
-use exercise::{Matcher, Mode, Scale, ScaleKind};
+use exercise::{Matcher, Mode, PlayStyle, Scale, ScaleKind};
 use pitch::Note;
 
 /// App name: Wayland namespace, single-instance lock, config dir.
@@ -35,6 +35,7 @@ enum Message {
     SetRoot(i64),
     SetScaleKind(exercise::ScaleKind),
     SetMode(exercise::Mode),
+    SetPlayStyle(exercise::PlayStyle),
     SetCents(f64),
     SetSustain(f64),
     /// Replay the current item's reference tone.
@@ -49,6 +50,8 @@ struct State {
     enabled: bool,
     scale: Scale,
     mode: Mode,
+    /// Whether chords play together (block) or as an arpejo.
+    play_style: PlayStyle,
     cents_window: f64,
     sustain_ms: f64,
     /// Target MIDI notes of the current item (playback octave).
@@ -79,6 +82,7 @@ impl Default for State {
             kind: ScaleKind::from_idx(cfg.scale_kind_idx),
         };
         let mode = Mode::from_idx(cfg.mode_idx);
+        let play_style = PlayStyle::from_idx(cfg.play_style_idx);
         let cents_window = cfg.cents_window;
         let sustain_ms = cfg.sustain_ms as f64;
         let mut rng = seed();
@@ -87,7 +91,7 @@ impl Default for State {
         let matcher = Matcher::new(&item, cents_window, sustain_ms);
         let tone = tone::Tone::new(cfg.audible);
         let present = if cfg.enabled {
-            tone.play(&freqs_of(&item))
+            tone.play(&freqs_of(&item), play_style == PlayStyle::Together)
         } else {
             std::time::Duration::ZERO
         };
@@ -95,6 +99,7 @@ impl Default for State {
             enabled: cfg.enabled,
             scale,
             mode,
+            play_style,
             cents_window,
             sustain_ms,
             item,
@@ -158,7 +163,10 @@ impl State {
         self.item = exercise::item_at(&self.scale, self.mode, degree);
         self.matcher = Matcher::new(&self.item, self.cents_window, self.sustain_ms);
         let present = if self.enabled {
-            self.tone.play(&freqs_of(&self.item))
+            self.tone.play(
+                &freqs_of(&self.item),
+                self.play_style == PlayStyle::Together,
+            )
         } else {
             Duration::ZERO
         };
@@ -179,6 +187,7 @@ impl State {
                 scale_root: self.scale.root,
                 scale_kind_idx: self.scale.kind.index(),
                 mode_idx: self.mode.index(),
+                play_style_idx: self.play_style.index(),
                 cents_window: self.cents_window,
                 sustain_ms: self.sustain_ms as u64,
             },
@@ -254,6 +263,11 @@ impl overlay::OverlayApp for State {
                 self.persist();
                 self.reset();
             }
+            Message::SetPlayStyle(s) => {
+                self.play_style = s;
+                self.persist();
+                self.reset();
+            }
             Message::SetCents(c) => {
                 self.cents_window = c;
                 self.persist();
@@ -265,7 +279,10 @@ impl overlay::OverlayApp for State {
                 self.reset();
             }
             Message::Replay if self.enabled => {
-                let present = self.tone.play(&freqs_of(&self.item));
+                let present = self.tone.play(
+                    &freqs_of(&self.item),
+                    self.play_style == PlayStyle::Together,
+                );
                 self.present_until = Some(Instant::now() + present);
             }
             _ => {}
@@ -355,6 +372,7 @@ fn event_stream() -> BoxStream<'static, Message> {
         scale_root: cfg.scale_root,
         scale_kind: ScaleKind::from_idx(cfg.scale_kind_idx),
         mode: Mode::from_idx(cfg.mode_idx),
+        play_style: PlayStyle::from_idx(cfg.play_style_idx),
         cents_window: cfg.cents_window,
         sustain_ms: cfg.sustain_ms as f64,
     })

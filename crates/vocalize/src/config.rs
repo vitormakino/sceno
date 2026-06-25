@@ -18,6 +18,9 @@ pub struct VocalizeConfig {
     /// Exercise mode index; see [`crate::exercise::Mode`].
     #[serde(default)]
     pub mode_idx: usize,
+    /// Chord playback style index (0 = together); see [`crate::exercise::PlayStyle`].
+    #[serde(default)]
+    pub play_style_idx: usize,
     /// Half-width of the in-tune window, in cents.
     #[serde(default = "default_cents")]
     pub cents_window: f64,
@@ -44,6 +47,7 @@ impl Default for VocalizeConfig {
             scale_root: 0,
             scale_kind_idx: 0,
             mode_idx: 0,
+            play_style_idx: 0,
             cents_window: 50.0,
             sustain_ms: 500,
         }
@@ -61,7 +65,8 @@ mod tests {
             audible: false,
             scale_root: 9,
             scale_kind_idx: 1,
-            mode_idx: 1,
+            mode_idx: 2,
+            play_style_idx: 1,
             cents_window: 25.0,
             sustain_ms: 800,
         };
@@ -71,7 +76,8 @@ mod tests {
         assert!(!loaded.audible);
         assert_eq!(loaded.scale_root, 9);
         assert_eq!(loaded.scale_kind_idx, 1);
-        assert_eq!(loaded.mode_idx, 1);
+        assert_eq!(loaded.mode_idx, 2);
+        assert_eq!(loaded.play_style_idx, 1);
         assert_eq!(loaded.cents_window, 25.0);
         assert_eq!(loaded.sustain_ms, 800);
     }
@@ -82,6 +88,8 @@ mod tests {
         assert!(cfg.enabled);
         assert!(cfg.audible);
         assert_eq!(cfg.scale_root, 0);
+        assert_eq!(cfg.mode_idx, 0);
+        assert_eq!(cfg.play_style_idx, 0);
         assert_eq!(cfg.cents_window, 50.0);
         assert_eq!(cfg.sustain_ms, 500);
     }

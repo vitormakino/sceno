@@ -20,10 +20,15 @@ const GAIN: f32 = 0.25;
 /// Attack / release ramp (s), to avoid clicks.
 const RAMP_SECS: f64 = 0.012;
 
+/// Shared slot for the next play request: the frequencies and whether to sound them
+/// together (block chord) or one after another (arpejo).
+type Pending = Arc<Mutex<Option<(Vec<f64>, bool)>>>;
+
 /// Handle to the tone player. Cheap to clone (two `Arc`s + a flag).
 #[derive(Clone)]
 pub struct Tone {
-    pending: Arc<Mutex<Option<Vec<f64>>>>,
+    /// The next play request (see [`Pending`]).
+    pending: Pending,
     audible: Arc<AtomicBool>,
     /// Whether an output device was present at startup. When false, [`Tone::play`]
     /// is a no-op returning `Duration::ZERO`, so the caller never gates listening
@@ -39,7 +44,7 @@ impl Tone {
     /// and reports zero duration.
     pub fn new(audible: bool) -> Tone {
         let playable = cpal::default_host().default_output_device().is_some();
-        let pending: Arc<Mutex<Option<Vec<f64>>>> = Arc::new(Mutex::new(None));
+        let pending: Pending = Arc::new(Mutex::new(None));
         let p = pending.clone();
         if playable {
             std::thread::spawn(move || run_output(p));
@@ -55,25 +60,26 @@ impl Tone {
         self.audible.store(on, Ordering::Relaxed);
     }
 
-    /// Queue a tone (one freq = sustained note; many = arpejo). Returns the total
-    /// planned playback duration so the caller can gate listening until it ends.
-    /// When muted or with no output device, plays nothing and returns
-    /// `Duration::ZERO` (listen immediately).
-    pub fn play(&self, freqs: &[f64]) -> Duration {
+    /// Queue a tone. A single frequency is a sustained note; several play together (a block
+    /// chord, `NOTE_SECS`) when `together`, or one after another (an arpejo) otherwise.
+    /// Returns the total planned playback duration so the caller can gate listening until it
+    /// ends. When muted or with no output device, plays nothing and returns `Duration::ZERO`
+    /// (listen immediately).
+    pub fn play(&self, freqs: &[f64], together: bool) -> Duration {
         if !self.playable || !self.audible.load(Ordering::Relaxed) || freqs.is_empty() {
             return Duration::ZERO;
         }
-        let secs = if freqs.len() == 1 {
+        let secs = if freqs.len() == 1 || together {
             NOTE_SECS
         } else {
             ARP_SECS * freqs.len() as f64
         };
-        *self.pending.lock().unwrap() = Some(freqs.to_vec());
+        *self.pending.lock().unwrap() = Some((freqs.to_vec(), together));
         Duration::from_secs_f64(secs)
     }
 }
 
-fn run_output(pending: Arc<Mutex<Option<Vec<f64>>>>) {
+fn run_output(pending: Pending) {
     let host = cpal::default_host();
     let Some(device) = host.default_output_device() else {
         eprintln!("[vocalize] no output device");
@@ -125,7 +131,7 @@ fn run_output(pending: Arc<Mutex<Option<Vec<f64>>>>) {
 fn build<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
-    pending: Arc<Mutex<Option<Vec<f64>>>>,
+    pending: Pending,
     sr: f64,
     channels: usize,
     err_fn: impl FnMut(cpal::StreamError) + Send + 'static,
@@ -138,9 +144,9 @@ where
         config,
         move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
             if let Ok(mut slot) = pending.try_lock()
-                && let Some(freqs) = slot.take()
+                && let Some((freqs, together)) = slot.take()
             {
-                synth.load(&freqs);
+                synth.load(&freqs, together);
             }
             for frame in data.chunks_mut(channels) {
                 let v = T::from_sample(synth.next());
@@ -154,19 +160,24 @@ where
     )
 }
 
+/// One playback segment: the frequencies sounding simultaneously and its length in samples.
+/// An arpejo is a queue of one-frequency segments; a block chord is a single multi-frequency
+/// segment.
 struct Seg {
-    freq: f64,
+    freqs: Vec<f64>,
     total: usize,
 }
 
-/// Renders a queue of enveloped sine segments, one sample at a time.
+/// Renders a queue of enveloped (poly)phonic sine segments, one sample at a time. The active
+/// segment is flattened into `cur_freqs` + `phases` (sibling fields) so a sample can read a
+/// frequency and advance its phase without a borrow conflict.
 struct ToneSynth {
     sr: f64,
     queue: VecDeque<Seg>,
-    cur: Option<Seg>,
+    cur_freqs: Vec<f64>,
+    phases: Vec<f64>,
     left: usize,
     total: usize,
-    phase: f64,
 }
 
 impl ToneSynth {
@@ -174,28 +185,35 @@ impl ToneSynth {
         ToneSynth {
             sr,
             queue: VecDeque::new(),
-            cur: None,
+            cur_freqs: Vec::new(),
+            phases: Vec::new(),
             left: 0,
             total: 0,
-            phase: 0.0,
         }
     }
 
-    /// Replace the queue with new segments (clears anything still playing).
-    fn load(&mut self, freqs: &[f64]) {
+    /// Replace the queue with new segments (clears anything still playing). `together` sounds
+    /// all freqs as one block-chord segment; otherwise each freq is its own arpejo segment.
+    fn load(&mut self, freqs: &[f64], together: bool) {
         self.queue.clear();
-        self.cur = None;
+        self.cur_freqs.clear();
+        self.phases.clear();
         self.left = 0;
         self.total = 0;
-        self.phase = 0.0;
-        let secs = if freqs.len() == 1 {
-            NOTE_SECS
+        if freqs.len() <= 1 || together {
+            let total = (self.sr * NOTE_SECS).max(1.0) as usize;
+            self.queue.push_back(Seg {
+                freqs: freqs.to_vec(),
+                total,
+            });
         } else {
-            ARP_SECS
-        };
-        let total = (self.sr * secs).max(1.0) as usize;
-        for &freq in freqs {
-            self.queue.push_back(Seg { freq, total });
+            let total = (self.sr * ARP_SECS).max(1.0) as usize;
+            for &freq in freqs {
+                self.queue.push_back(Seg {
+                    freqs: vec![freq],
+                    total,
+                });
+            }
         }
     }
 
@@ -205,18 +223,18 @@ impl ToneSynth {
                 Some(seg) => {
                     self.total = seg.total;
                     self.left = seg.total;
-                    self.phase = 0.0;
-                    self.cur = Some(seg);
+                    self.phases = vec![0.0; seg.freqs.len()];
+                    self.cur_freqs = seg.freqs;
                 }
                 None => {
-                    self.cur = None;
+                    self.cur_freqs.clear();
                     return 0.0;
                 }
             }
         }
-        let Some(seg) = &self.cur else {
+        if self.cur_freqs.is_empty() {
             return 0.0;
-        };
+        }
         let pos = self.total - self.left;
         let ramp = ((RAMP_SECS * self.sr) as usize).max(1);
         let env = if pos < ramp {
@@ -226,8 +244,17 @@ impl ToneSynth {
         } else {
             1.0
         };
-        self.phase += std::f64::consts::TAU * seg.freq / self.sr;
+        let n = self.cur_freqs.len();
+        let mut sample = 0.0f32;
+        for i in 0..n {
+            // Copy the freq out first so the immutable borrow ends before `phases[i]` is
+            // mutated (the same disjoint-access reason the single-voice version compiled).
+            let freq = self.cur_freqs[i];
+            self.phases[i] += std::f64::consts::TAU * freq / self.sr;
+            sample += self.phases[i].sin() as f32;
+        }
         self.left -= 1;
-        (self.phase.sin() as f32) * env * GAIN
+        // Average the voices so a chord doesn't clip relative to a single note.
+        (sample / n as f32) * env * GAIN
     }
 }
