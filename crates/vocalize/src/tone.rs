@@ -20,9 +20,43 @@ const GAIN: f32 = 0.25;
 /// Attack / release ramp (s), to avoid clicks.
 const RAMP_SECS: f64 = 0.012;
 
-/// Shared slot for the next play request: the frequencies and whether to sound them
-/// together (block chord) or one after another (arpejo).
-type Pending = Arc<Mutex<Option<(Vec<f64>, bool)>>>;
+// FM electric-piano voice parameters (carrier oscillates at the fundamental).
+/// Modulator-to-carrier frequency ratio.
+const EP_MOD_RATIO: f64 = 1.0;
+/// Peak FM modulation index (attack brightness).
+const EP_INDEX: f64 = 3.0;
+/// Time constant (s) of the modulation-index decay — the bright "tine" attack.
+const EP_MOD_DECAY: f64 = 0.18;
+/// Time constant (s) of the amplitude decay — the percussive body.
+const EP_AMP_DECAY: f64 = 0.9;
+
+/// Reference-tone timbre. Stable indices (persisted).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Timbre {
+    /// FM electric-piano voice (default).
+    ElectricPiano,
+    /// Pure sine (the original simple tone).
+    Sine,
+}
+
+impl Timbre {
+    pub fn index(self) -> usize {
+        match self {
+            Timbre::ElectricPiano => 0,
+            Timbre::Sine => 1,
+        }
+    }
+    pub fn from_idx(i: usize) -> Self {
+        match i {
+            1 => Timbre::Sine,
+            _ => Timbre::ElectricPiano,
+        }
+    }
+}
+
+/// Shared slot for the next play request: the frequencies, whether to sound them together
+/// (block chord) or one after another (arpejo), and the timbre.
+type Pending = Arc<Mutex<Option<(Vec<f64>, bool, Timbre)>>>;
 
 /// Handle to the tone player. Cheap to clone (two `Arc`s + a flag).
 #[derive(Clone)]
@@ -65,7 +99,7 @@ impl Tone {
     /// Returns the total planned playback duration so the caller can gate listening until it
     /// ends. When muted or with no output device, plays nothing and returns `Duration::ZERO`
     /// (listen immediately).
-    pub fn play(&self, freqs: &[f64], together: bool) -> Duration {
+    pub fn play(&self, freqs: &[f64], together: bool, timbre: Timbre) -> Duration {
         if !self.playable || !self.audible.load(Ordering::Relaxed) || freqs.is_empty() {
             return Duration::ZERO;
         }
@@ -74,7 +108,7 @@ impl Tone {
         } else {
             ARP_SECS * freqs.len() as f64
         };
-        *self.pending.lock().unwrap() = Some((freqs.to_vec(), together));
+        *self.pending.lock().unwrap() = Some((freqs.to_vec(), together, timbre));
         Duration::from_secs_f64(secs)
     }
 }
@@ -144,9 +178,9 @@ where
         config,
         move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
             if let Ok(mut slot) = pending.try_lock()
-                && let Some((freqs, together)) = slot.take()
+                && let Some((freqs, together, timbre)) = slot.take()
             {
-                synth.load(&freqs, together);
+                synth.load(&freqs, together, timbre);
             }
             for frame in data.chunks_mut(channels) {
                 let v = T::from_sample(synth.next());
@@ -168,14 +202,16 @@ struct Seg {
     total: usize,
 }
 
-/// Renders a queue of enveloped (poly)phonic sine segments, one sample at a time. The active
-/// segment is flattened into `cur_freqs` + `phases` (sibling fields) so a sample can read a
-/// frequency and advance its phase without a borrow conflict.
+/// Renders a queue of enveloped (poly)phonic segments, one sample at a time. The active
+/// segment is flattened into `cur_freqs` + `phases` (+ `mod_phases` for FM) so a sample can
+/// read a frequency and advance its phases without a borrow conflict.
 struct ToneSynth {
     sr: f64,
     queue: VecDeque<Seg>,
     cur_freqs: Vec<f64>,
     phases: Vec<f64>,
+    mod_phases: Vec<f64>,
+    timbre: Timbre,
     left: usize,
     total: usize,
 }
@@ -187,6 +223,8 @@ impl ToneSynth {
             queue: VecDeque::new(),
             cur_freqs: Vec::new(),
             phases: Vec::new(),
+            mod_phases: Vec::new(),
+            timbre: Timbre::ElectricPiano,
             left: 0,
             total: 0,
         }
@@ -194,10 +232,12 @@ impl ToneSynth {
 
     /// Replace the queue with new segments (clears anything still playing). `together` sounds
     /// all freqs as one block-chord segment; otherwise each freq is its own arpejo segment.
-    fn load(&mut self, freqs: &[f64], together: bool) {
+    fn load(&mut self, freqs: &[f64], together: bool, timbre: Timbre) {
         self.queue.clear();
         self.cur_freqs.clear();
         self.phases.clear();
+        self.mod_phases.clear();
+        self.timbre = timbre;
         self.left = 0;
         self.total = 0;
         if freqs.len() <= 1 || together {
@@ -224,6 +264,7 @@ impl ToneSynth {
                     self.total = seg.total;
                     self.left = seg.total;
                     self.phases = vec![0.0; seg.freqs.len()];
+                    self.mod_phases = vec![0.0; seg.freqs.len()];
                     self.cur_freqs = seg.freqs;
                 }
                 None => {
@@ -236,8 +277,9 @@ impl ToneSynth {
             return 0.0;
         }
         let pos = self.total - self.left;
+        let t = pos as f64 / self.sr; // seconds since the strike
         let ramp = ((RAMP_SECS * self.sr) as usize).max(1);
-        let env = if pos < ramp {
+        let ramp_env = if pos < ramp {
             pos as f32 / ramp as f32
         } else if self.left < ramp {
             self.left as f32 / ramp as f32
@@ -246,15 +288,84 @@ impl ToneSynth {
         };
         let n = self.cur_freqs.len();
         let mut sample = 0.0f32;
-        for i in 0..n {
-            // Copy the freq out first so the immutable borrow ends before `phases[i]` is
-            // mutated (the same disjoint-access reason the single-voice version compiled).
-            let freq = self.cur_freqs[i];
-            self.phases[i] += std::f64::consts::TAU * freq / self.sr;
-            sample += self.phases[i].sin() as f32;
+        match self.timbre {
+            Timbre::Sine => {
+                for i in 0..n {
+                    // Copy the freq out first so the immutable borrow ends before `phases[i]`
+                    // is mutated (the disjoint-access reason this pattern compiles).
+                    let freq = self.cur_freqs[i];
+                    self.phases[i] += std::f64::consts::TAU * freq / self.sr;
+                    sample += self.phases[i].sin() as f32;
+                }
+                sample = (sample / n as f32) * ramp_env;
+            }
+            Timbre::ElectricPiano => {
+                let index = EP_INDEX * (-t / EP_MOD_DECAY).exp();
+                let amp = (-t / EP_AMP_DECAY).exp() as f32;
+                for i in 0..n {
+                    let freq = self.cur_freqs[i];
+                    self.phases[i] += std::f64::consts::TAU * freq / self.sr;
+                    self.mod_phases[i] += std::f64::consts::TAU * freq * EP_MOD_RATIO / self.sr;
+                    let s = (self.phases[i] + index * self.mod_phases[i].sin()).sin();
+                    sample += s as f32;
+                }
+                sample = (sample / n as f32) * ramp_env * amp;
+            }
         }
         self.left -= 1;
-        // Average the voices so a chord doesn't clip relative to a single note.
-        (sample / n as f32) * env * GAIN
+        sample * GAIN
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timbre_idx_roundtrips() {
+        assert_eq!(
+            Timbre::from_idx(Timbre::ElectricPiano.index()),
+            Timbre::ElectricPiano
+        );
+        assert_eq!(Timbre::from_idx(Timbre::Sine.index()), Timbre::Sine);
+        assert_eq!(Timbre::from_idx(99), Timbre::ElectricPiano);
+    }
+
+    fn render(timbre: Timbre, n: usize) -> Vec<f32> {
+        let mut s = ToneSynth::new(48_000.0);
+        // A C-major triad played together.
+        s.load(&[261.63, 329.63, 392.0], true, timbre);
+        (0..n).map(|_| s.next()).collect()
+    }
+
+    fn peak(samples: &[f32]) -> f32 {
+        samples.iter().fold(0.0f32, |m, &x| m.max(x.abs()))
+    }
+
+    #[test]
+    fn output_is_finite_and_bounded() {
+        for timbre in [Timbre::ElectricPiano, Timbre::Sine] {
+            let out = render(timbre, 48_000); // ~1 s
+            assert!(
+                out.iter().all(|x| x.is_finite()),
+                "{timbre:?} produced a non-finite sample"
+            );
+            assert!(
+                out.iter().all(|x| x.abs() <= 1.0),
+                "{timbre:?} clipped past 1.0"
+            );
+            assert!(peak(&out) > 0.0, "{timbre:?} was silent");
+        }
+    }
+
+    #[test]
+    fn electric_piano_decays() {
+        let all = render(Timbre::ElectricPiano, 48_000);
+        let early = peak(&all[0..2_400]); // ~0..50 ms
+        let late = peak(&all[33_600..36_000]); // ~700..750 ms
+        assert!(
+            early > late * 1.5,
+            "EP did not decay: early {early}, late {late}"
+        );
     }
 }

@@ -12,6 +12,7 @@ mod tray;
 use config::VocalizeConfig;
 use exercise::{Matcher, Mode, PlayStyle, Scale, ScaleKind};
 use pitch::Note;
+use tone::Timbre;
 
 /// App name: Wayland namespace, single-instance lock, config dir.
 const APP: &str = "vocalize";
@@ -52,6 +53,8 @@ struct State {
     mode: Mode,
     /// Whether chords play together (block) or as an arpejo.
     play_style: PlayStyle,
+    /// Reference-tone timbre (electric piano or sine).
+    timbre: Timbre,
     cents_window: f64,
     sustain_ms: f64,
     /// Target MIDI notes of the current item (playback octave).
@@ -83,6 +86,7 @@ impl Default for State {
         };
         let mode = Mode::from_idx(cfg.mode_idx);
         let play_style = PlayStyle::from_idx(cfg.play_style_idx);
+        let timbre = Timbre::from_idx(cfg.timbre_idx);
         let cents_window = cfg.cents_window;
         let sustain_ms = cfg.sustain_ms as f64;
         let mut rng = seed();
@@ -91,7 +95,7 @@ impl Default for State {
         let matcher = Matcher::new(&item, cents_window, sustain_ms);
         let tone = tone::Tone::new(cfg.audible);
         let present = if cfg.enabled {
-            tone.play(&freqs_of(&item), play_style == PlayStyle::Together)
+            tone.play(&freqs_of(&item), play_style == PlayStyle::Together, timbre)
         } else {
             std::time::Duration::ZERO
         };
@@ -100,6 +104,7 @@ impl Default for State {
             scale,
             mode,
             play_style,
+            timbre,
             cents_window,
             sustain_ms,
             item,
@@ -166,6 +171,7 @@ impl State {
             self.tone.play(
                 &freqs_of(&self.item),
                 self.play_style == PlayStyle::Together,
+                self.timbre,
             )
         } else {
             Duration::ZERO
@@ -188,6 +194,7 @@ impl State {
                 scale_kind_idx: self.scale.kind.index(),
                 mode_idx: self.mode.index(),
                 play_style_idx: self.play_style.index(),
+                timbre_idx: self.timbre.index(),
                 cents_window: self.cents_window,
                 sustain_ms: self.sustain_ms as u64,
             },
@@ -282,6 +289,7 @@ impl overlay::OverlayApp for State {
                 let present = self.tone.play(
                     &freqs_of(&self.item),
                     self.play_style == PlayStyle::Together,
+                    self.timbre,
                 );
                 self.present_until = Some(Instant::now() + present);
             }
