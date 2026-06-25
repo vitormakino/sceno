@@ -1,5 +1,5 @@
-//! System-tray menu for vocalize: toggle, tonality, mode, tolerance, sustain,
-//! sound, and tone replay.
+//! System-tray menu for vocalize: toggle, tonality, scale, mode, chord playback,
+//! timbre, tolerance, sustain, sound, and tone replay.
 
 use futures::channel::mpsc::UnboundedSender;
 

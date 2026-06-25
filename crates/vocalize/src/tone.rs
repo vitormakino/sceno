@@ -21,12 +21,15 @@ const GAIN: f32 = 0.25;
 const RAMP_SECS: f64 = 0.012;
 
 // FM electric-piano voice parameters (carrier oscillates at the fundamental).
-/// Modulator-to-carrier frequency ratio.
-const EP_MOD_RATIO: f64 = 1.0;
+// Tuned for a bright, metallic "tine" attack: a higher modulator ratio adds upper
+// harmonics, a strong index makes the attack sing, and a quick index decay lets it
+// ping then mellow into the body. Lower `EP_MOD_RATIO`/`EP_INDEX` for a darker tone.
+/// Modulator-to-carrier frequency ratio (higher = brighter / more metallic).
+const EP_MOD_RATIO: f64 = 3.0;
 /// Peak FM modulation index (attack brightness).
-const EP_INDEX: f64 = 3.0;
+const EP_INDEX: f64 = 4.5;
 /// Time constant (s) of the modulation-index decay — the bright "tine" attack.
-const EP_MOD_DECAY: f64 = 0.18;
+const EP_MOD_DECAY: f64 = 0.12;
 /// Time constant (s) of the amplitude decay — the percussive body.
 const EP_AMP_DECAY: f64 = 0.9;
 
@@ -293,6 +296,8 @@ impl ToneSynth {
         } else {
             1.0
         };
+        // Sum the voices and divide by `n` (below) so a chord doesn't clip relative to a
+        // single note.
         let n = self.cur_freqs.len();
         let mut sample = 0.0f32;
         match self.timbre {
