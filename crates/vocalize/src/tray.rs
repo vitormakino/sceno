@@ -4,6 +4,7 @@
 use futures::channel::mpsc::UnboundedSender;
 
 use crate::exercise::{Mode, PlayStyle, ScaleKind};
+use crate::tone::Timbre;
 use crate::{CENTS_STEPS, Message, ROOTS, SUSTAIN_STEPS, exercise};
 
 pub struct VocalizeTray {
@@ -14,6 +15,7 @@ pub struct VocalizeTray {
     pub scale_kind: ScaleKind,
     pub mode: Mode,
     pub play_style: PlayStyle,
+    pub timbre: Timbre,
     pub cents_window: f64,
     pub sustain_ms: f64,
 }
@@ -34,6 +36,7 @@ impl ksni::Tray for VocalizeTray {
         let kind_idx = self.scale_kind.index();
         let mode_idx = self.mode.index();
         let play_style_idx = self.play_style.index();
+        let timbre_idx = self.timbre.index();
         let cents_idx = CENTS_STEPS
             .iter()
             .position(|&c| (c - self.cents_window).abs() < 0.5)
@@ -138,6 +141,29 @@ impl ksni::Tray for VocalizeTray {
                             .iter()
                             .map(|s| RadioItem {
                                 label: s.label().into(),
+                                ..Default::default()
+                            })
+                            .collect(),
+                    }
+                    .into(),
+                ],
+                ..Default::default()
+            }
+            .into(),
+            SubMenu {
+                label: "Timbre".into(),
+                submenu: vec![
+                    RadioGroup {
+                        selected: timbre_idx,
+                        select: Box::new(|this: &mut Self, idx| {
+                            let t = Timbre::from_idx(idx);
+                            this.timbre = t;
+                            let _ = this.tx.unbounded_send(Message::SetTimbre(t));
+                        }),
+                        options: Timbre::ALL
+                            .iter()
+                            .map(|t| RadioItem {
+                                label: t.label().into(),
                                 ..Default::default()
                             })
                             .collect(),

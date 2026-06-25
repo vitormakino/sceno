@@ -52,6 +52,13 @@ impl Timbre {
             _ => Timbre::ElectricPiano,
         }
     }
+    pub fn label(self) -> &'static str {
+        match self {
+            Timbre::ElectricPiano => "Piano elétrico",
+            Timbre::Sine => "Senóide",
+        }
+    }
+    pub const ALL: [Timbre; 2] = [Timbre::ElectricPiano, Timbre::Sine];
 }
 
 /// Shared slot for the next play request: the frequencies, whether to sound them together

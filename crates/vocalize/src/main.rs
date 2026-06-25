@@ -37,6 +37,7 @@ enum Message {
     SetScaleKind(exercise::ScaleKind),
     SetMode(exercise::Mode),
     SetPlayStyle(exercise::PlayStyle),
+    SetTimbre(tone::Timbre),
     SetCents(f64),
     SetSustain(f64),
     /// Replay the current item's reference tone.
@@ -275,6 +276,11 @@ impl overlay::OverlayApp for State {
                 self.persist();
                 self.reset();
             }
+            Message::SetTimbre(t) => {
+                self.timbre = t;
+                self.persist();
+                self.reset();
+            }
             Message::SetCents(c) => {
                 self.cents_window = c;
                 self.persist();
@@ -381,6 +387,7 @@ fn event_stream() -> BoxStream<'static, Message> {
         scale_kind: ScaleKind::from_idx(cfg.scale_kind_idx),
         mode: Mode::from_idx(cfg.mode_idx),
         play_style: PlayStyle::from_idx(cfg.play_style_idx),
+        timbre: Timbre::from_idx(cfg.timbre_idx),
         cents_window: cfg.cents_window,
         sustain_ms: cfg.sustain_ms as f64,
     })
