@@ -1,0 +1,21 @@
+[package]
+name = "metronome"
+description = "Metronome overlay: manual/tap tempo, song-grid sync, or live tempo detection."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+overlay = { path = "../overlay" }
+beat = { path = "../beat" }
+media = { path = "../media" }
+iced = { workspace = true, features = ["canvas"] }
+iced_layershell.workspace = true
+futures.workspace = true
+serde.workspace = true
+ksni.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

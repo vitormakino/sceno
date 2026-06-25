@@ -1,0 +1,12 @@
+[package]
+name = "beat"
+description = "Beat-clock timing, metronome click synthesis, and tempo detection for sceno."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+overlay = { path = "../overlay" }
+cpal = "0.15"
