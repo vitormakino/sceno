@@ -64,14 +64,17 @@ system. Four shared library crates + five app binaries:
   degree) / Tríade (`d,d+2,d+4`) / Tétrade (diatonic 7th `d,d+2,d+4,d+6`); a chord is
   collected one note at a time, in any order. `tone.rs` renders the reference tone on demand
   off a cpal **output** stream (the `beat::click` sine pattern, queued not clock-driven); its
-  `ToneSynth` sums N simultaneous sine voices, so `PlayStyle` (tray **Reprodução**) plays a
-  chord either **Junto** (one block segment, default) or **Arpejo** (one segment per note).
+  `ToneSynth` sums N simultaneous voices of one of two timbres — an FM **electric piano**
+  (`Timbre::ElectricPiano`, default: carrier + a fast-decaying modulator + a percussive
+  amplitude envelope) or a pure **`Sine`** — selected by the tray **Timbre** submenu. `PlayStyle`
+  (tray **Reprodução**) plays a chord either **Junto** (one block segment, default) or **Arpejo**
+  (one segment per note).
   A tall fixed panel (`surface_height()=160`, `stacks()=false`) shows the target as
   solfège+letter chips (`Dó (C)`) that turn green as each note is collected; the matcher is
   gated off while the tone sounds so mic bleed can't auto-pass. A 33 ms gated tick drives
   sustain timing + the success flash. `VocalizeConfig { enabled, audible, scale_root,
-  scale_kind_idx, mode_idx, play_style_idx, cents_window, sustain_ms }` persists the tray
-  choices (Tonalidade, Escala, Modo, Reprodução, Tolerância, Sustentação, Som, Repetir tom).
+  scale_kind_idx, mode_idx, play_style_idx, timbre_idx, cents_window, sustain_ms }` persists the tray
+  choices (Tonalidade, Escala, Modo, Reprodução, Timbre, Tolerância, Sustentação, Som, Repetir tom).
 
 Each app owns a per-app data folder `~/.local/share/sceno/<app>` (`overlay::data_dir("<app>")`),
 so file kinds don't intermingle: `karaoke` and `metronome` read UltraStar `.txt` from

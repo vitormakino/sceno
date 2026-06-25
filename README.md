@@ -21,8 +21,8 @@ app — each app is its own small binary.
   visual flash, each toggleable independently.
 - **`vocalize`** — a singing ear trainer. Plays + shows a note or chord; waits
   for you to sing it before advancing. Adjustable scale, mode (notes, power
-  chord, triad, tetrad), chord playback (together or arpeggio), tolerance, and
-  sustain from the tray.
+  chord, triad, tetrad), chord playback (together or arpeggio), tone timbre
+  (electric piano or sine), tolerance, and sustain from the tray.
 
 ## Building
 
