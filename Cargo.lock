@@ -3005,7 +3005,6 @@ dependencies = [
  "futures",
  "iced",
  "iced_layershell",
- "ksni",
  "libc",
  "serde",
  "serde_json",

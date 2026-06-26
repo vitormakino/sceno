@@ -11,12 +11,22 @@
 //! Slot correctness rests entirely on `flock` (atomic), so D-Bus timing only affects *when* a
 //! reflow happens, never *who* owns which slot.
 
+//! The slot-ownership (`flock`) and reflow (D-Bus) machinery below is Linux-only
+//! and gated as such; the geometry math (margins, constants) is cross-platform so
+//! the off-Linux window backend can reuse it.
+
+#[cfg(target_os = "linux")]
 use std::fs::File;
+#[cfg(target_os = "linux")]
 use std::os::unix::io::AsRawFd;
+#[cfg(target_os = "linux")]
 use std::path::PathBuf;
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
 use futures::channel::mpsc;
+#[cfg(target_os = "linux")]
 use futures::stream::BoxStream;
 
 /// Margin tuple `(top, right, bottom, left)`, matching `LayerShellSettings.margin`.
@@ -31,10 +41,13 @@ pub const GAP: i32 = 8;
 /// Vertical pitch between adjacent slots.
 pub const PITCH: i32 = SURFACE_HEIGHT + GAP;
 /// Defensive bound on how many slots to probe (real usage is 2).
+#[cfg(target_os = "linux")]
 const MAX_SLOTS: usize = 32;
 /// D-Bus dispatch timeout; bounds how long a quit takes to notice a stuck bus, not latency.
+#[cfg(target_os = "linux")]
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(1);
 /// Shared bus-name prefix; one well-known name per app (`dev.sceno.<app>`).
+#[cfg(target_os = "linux")]
 const BUS_PREFIX: &str = "dev.sceno.";
 
 /// Margin for a given stack slot at the bottom edge (slot 0 = bottom-most).
@@ -42,17 +55,20 @@ pub fn margin_for_slot(slot: usize) -> Margin {
     (0, 0, BASE_MARGIN + (slot as i32) * PITCH, 0)
 }
 
+#[cfg(target_os = "linux")]
 fn slot_path(index: usize) -> PathBuf {
     let dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
     std::path::Path::new(&dir).join(format!("sceno-stack-{index}.lock"))
 }
 
 /// RAII holder of a claimed stack slot. Dropping it closes the fd, releasing the `flock`.
+#[cfg(target_os = "linux")]
 pub struct SlotGuard {
     index: usize,
     _file: File, // held open => lock held; closed on drop => released
 }
 
+#[cfg(target_os = "linux")]
 impl SlotGuard {
     pub fn index(&self) -> usize {
         self.index
@@ -63,6 +79,7 @@ impl SlotGuard {
 }
 
 /// Try to exclusively claim slot `index`. `None` if another process holds it or on I/O error.
+#[cfg(target_os = "linux")]
 pub fn try_claim_slot(index: usize) -> Option<SlotGuard> {
     let file = std::fs::OpenOptions::new()
         .write(true)
@@ -76,6 +93,7 @@ pub fn try_claim_slot(index: usize) -> Option<SlotGuard> {
 }
 
 /// Claim the lowest currently-free slot (probes 0, 1, 2, …).
+#[cfg(target_os = "linux")]
 pub fn claim_lowest() -> SlotGuard {
     (0..MAX_SLOTS)
         .find_map(try_claim_slot)
@@ -85,6 +103,7 @@ pub fn claim_lowest() -> SlotGuard {
 /// Attempt to move `guard` down to the lowest free slot below its current index.
 /// Acquire-before-release: the new slot is locked before the old one is dropped, so the
 /// process never holds zero slots. Returns the new margin if it moved.
+#[cfg(target_os = "linux")]
 fn migrate_down(guard: &mut SlotGuard) -> Option<Margin> {
     for lower in 0..guard.index() {
         if let Some(new_guard) = try_claim_slot(lower) {
@@ -102,6 +121,7 @@ fn migrate_down(guard: &mut SlotGuard) -> Option<Margin> {
 
 /// Spawn the D-Bus presence + reflow loop, taking ownership of the already-claimed slot.
 /// Emits a new margin whenever a sibling appearing/disappearing frees a lower slot.
+#[cfg(target_os = "linux")]
 pub fn reflow_stream(app: &str, guard: SlotGuard) -> BoxStream<'static, Margin> {
     let (tx, rx) = mpsc::unbounded::<Margin>();
     let bus_name = format!("{BUS_PREFIX}{app}");

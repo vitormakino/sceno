@@ -1,13 +1,17 @@
+// The macOS build compiles without the tray; the menu/option helpers it would
+// use are then unused. Silence dead-code there rather than cfg-gate each one.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
+
 use futures::channel::mpsc;
 use futures::stream::BoxStream;
 use iced::widget::{column, container, row, text};
 use iced::{Color, Element, Subscription, Task};
-use iced_layershell::to_layer_message;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 mod config;
 mod exercise;
 mod tone;
+#[cfg(target_os = "linux")]
 mod tray;
 use config::VocalizeConfig;
 use exercise::{Matcher, Mode, PlayStyle, Scale, ScaleKind};
@@ -28,7 +32,7 @@ pub const CENTS_STEPS: [f64; 3] = [25.0, 50.0, 75.0];
 /// Selectable sustain-time steps (ms).
 pub const SUSTAIN_STEPS: [f64; 3] = [300.0, 500.0, 800.0];
 
-#[to_layer_message]
+#[cfg_attr(target_os = "linux", iced_layershell::to_layer_message)]
 #[derive(Debug, Clone)]
 enum Message {
     SetEnabled(bool),
@@ -208,6 +212,7 @@ impl overlay::OverlayApp for State {
     fn namespace() -> &'static str {
         APP
     }
+    #[cfg(target_os = "linux")]
     fn margin_changed(margin: (i32, i32, i32, i32)) -> Message {
         Message::MarginChange(margin)
     }
@@ -299,6 +304,8 @@ impl overlay::OverlayApp for State {
                 );
                 self.present_until = Some(Instant::now() + present);
             }
+            // Absorbs the guarded `Replay` (when disabled) plus, on Linux, the extra
+            // variants the `#[to_layer_message]` macro injects (MarginChange, …).
             _ => {}
         }
         Task::none()
@@ -378,20 +385,27 @@ impl overlay::OverlayApp for State {
 
 fn event_stream() -> BoxStream<'static, Message> {
     let (tx, rx) = mpsc::unbounded::<Message>();
-    let cfg: VocalizeConfig = overlay::load_config(APP);
-    ksni::TrayService::new(tray::VocalizeTray {
-        tx: tx.clone(),
-        enabled: cfg.enabled,
-        audible: cfg.audible,
-        scale_root: cfg.scale_root,
-        scale_kind: ScaleKind::from_idx(cfg.scale_kind_idx),
-        mode: Mode::from_idx(cfg.mode_idx),
-        play_style: PlayStyle::from_idx(cfg.play_style_idx),
-        timbre: Timbre::from_idx(cfg.timbre_idx),
-        cents_window: cfg.cents_window,
-        sustain_ms: cfg.sustain_ms as f64,
-    })
-    .spawn();
+
+    // The tray is Linux-only (ksni / StatusNotifierItem over D-Bus). Off Linux the
+    // overlay runs with the persisted config and no menu — see CLAUDE.md.
+    #[cfg(target_os = "linux")]
+    {
+        let cfg: VocalizeConfig = overlay::load_config(APP);
+        ksni::TrayService::new(tray::VocalizeTray {
+            tx: tx.clone(),
+            enabled: cfg.enabled,
+            audible: cfg.audible,
+            scale_root: cfg.scale_root,
+            scale_kind: ScaleKind::from_idx(cfg.scale_kind_idx),
+            mode: Mode::from_idx(cfg.mode_idx),
+            play_style: PlayStyle::from_idx(cfg.play_style_idx),
+            timbre: Timbre::from_idx(cfg.timbre_idx),
+            cents_window: cfg.cents_window,
+            sustain_ms: cfg.sustain_ms as f64,
+        })
+        .spawn();
+    }
+
     std::thread::spawn(move || {
         pitch::run_capture(|freq| tx.unbounded_send(Message::PitchUpdate(freq)).is_ok());
     });
@@ -411,6 +425,6 @@ fn tick_stream() -> BoxStream<'static, Message> {
     Box::pin(rx)
 }
 
-fn main() -> iced_layershell::Result {
+fn main() -> overlay::Result {
     overlay::run::<State>()
 }

@@ -87,6 +87,24 @@ Stack: `iced` 0.14 under `iced_layershell` 0.18 (wgpu), `ksni` tray, `serde`,
 `pitch-detection` (McLeod/MPM), `cpal`, `mpris`, `ureq`. `#[to_layer_message]` injects extra
 `Message` variants, so `update` match blocks need a `_ => {}` arm.
 
+## Platforms
+
+Linux/Wayland is the primary target. `tuner` and `vocalize` also build on **macOS**:
+`overlay::run` has two backends behind `#[cfg(target_os = "linux")]` — the layer-shell
+shell on Linux, a plain `iced` always-on-top transparent window (centered, pinned near the
+bottom via `window::Position::SpecificWith`) elsewhere. The layer-shell–only pieces are
+Linux-gated: `iced_layershell`/`dbus` deps, `OverlayApp::{margin_changed, anchor}`, the
+`#[to_layer_message]` attribute (apply it via `#[cfg_attr(target_os = "linux", …)]`), the
+auto-stacking in `stack.rs`, and the `OverlayMessage` `TryInto<…>` bound. Apps return
+`overlay::Result` (a platform alias) from `main`. The system tray (`ksni`) is Linux-only;
+on macOS the overlay runs from the persisted config with **no tray and no click-through**
+(`iced` 0.14 has no `cursor_hittest`) — both are documented follow-ups. `lyrics`/`karaoke`/
+`metronome` stay Linux-only (they need the `mpris` now-playing source). CI verifies the
+macOS subset via the `check-macos` job (`overlay`, `pitch`, `tuner`, `vocalize`). When
+editing a `tuner`/`vocalize` `update` match, a `_ => {}` arm that becomes unreachable off
+Linux must be `#[cfg(target_os = "linux")]`-gated (unless a guarded arm keeps it reachable).
+See `docs/plans/2026-06-26-macos-compat.md`.
+
 ## Tuner meter styles
 
 The tuner display is a translucent dark "pill" showing the note name + signed cents, with a

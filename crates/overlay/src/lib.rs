@@ -1,4 +1,10 @@
-//! Reusable Wayland layer-shell overlay shell shared by the overlay apps.
+//! Reusable overlay shell shared by the sceno apps.
+//!
+//! On **Linux** each app is wired into a Wayland *layer-shell* surface
+//! (transparent, click-through, auto-stacked at the bottom edge). On other
+//! platforms (**macOS**) it falls back to a plain `iced` always-on-top
+//! transparent window — see [`run`]. The [`OverlayApp`] trait is the shared
+//! seam; the platform-specific glue lives behind `#[cfg(target_os = "linux")]`.
 
 mod paths;
 mod settings;
@@ -9,19 +15,33 @@ pub use settings::{FontSize, load_config, save};
 pub use stack::{Margin, margin_for_slot};
 pub use trace::{debug, debug_enabled};
 
-use futures::stream::{self, BoxStream, StreamExt};
 use iced::Element;
 use iced::Subscription;
 use iced::Task;
-use iced_layershell::actions::LayerShellCustomActionWithId;
-use iced_layershell::reexport::{Anchor, KeyboardInteractivity, Layer};
-use iced_layershell::settings::LayerShellSettings;
 use std::os::unix::io::AsRawFd;
+
+#[cfg(target_os = "linux")]
+use futures::stream::{self, BoxStream, StreamExt};
+#[cfg(target_os = "linux")]
+use iced_layershell::actions::LayerShellCustomActionWithId;
+#[cfg(target_os = "linux")]
+use iced_layershell::reexport::{Anchor, KeyboardInteractivity, Layer};
+#[cfg(target_os = "linux")]
+use iced_layershell::settings::LayerShellSettings;
+#[cfg(target_os = "linux")]
 use std::sync::{Mutex, OnceLock};
+
+/// Result type returned by [`run`]: the layer-shell result on Linux, the plain
+/// `iced` result elsewhere. Apps return this from `main`.
+#[cfg(target_os = "linux")]
+pub type Result = iced_layershell::Result;
+#[cfg(not(target_os = "linux"))]
+pub type Result = iced::Result;
 
 /// Hands the slot claimed synchronously in [`run`] to the reflow subscription, which takes it
 /// exactly once. Safe as a process-global because `ensure_single_instance` guarantees one
 /// process per app id.
+#[cfg(target_os = "linux")]
 static STACK_GUARD: OnceLock<Mutex<Option<stack::SlotGuard>>> = OnceLock::new();
 
 /// Exits the process if another instance of `app` is already running.
@@ -48,25 +68,43 @@ pub fn ensure_single_instance(app: &str) {
     std::mem::forget(file);
 }
 
+/// Bound on an app's message type. On Linux it must additionally carry the
+/// `TryInto<LayerShellCustomActionWithId>` conversion that `#[to_layer_message]`
+/// generates; on other platforms a plain `Clone + Debug + Send` message suffices.
+#[cfg(target_os = "linux")]
+pub trait OverlayMessage:
+    Clone + std::fmt::Debug + Send + 'static + TryInto<LayerShellCustomActionWithId, Error = Self>
+{
+}
+#[cfg(target_os = "linux")]
+impl<T> OverlayMessage for T where
+    T: Clone + std::fmt::Debug + Send + 'static + TryInto<LayerShellCustomActionWithId, Error = T>
+{
+}
+
+/// See the Linux variant above. Off Linux there is no layer-shell action type.
+#[cfg(not(target_os = "linux"))]
+pub trait OverlayMessage: Clone + std::fmt::Debug + Send + 'static {}
+#[cfg(not(target_os = "linux"))]
+impl<T> OverlayMessage for T where T: Clone + std::fmt::Debug + Send + 'static {}
+
 /// The interface every overlay app must implement.
 ///
-/// `run::<A>()` wires the app into `iced_layershell` with the shared defaults
-/// (transparent background, bottom-anchored, Layer::Top, 80px tall, etc.).
+/// `run::<A>()` wires the app into the layer shell (Linux) or a plain `iced`
+/// window (macOS) with the shared defaults (transparent background,
+/// bottom-anchored, always-on-top, 80px tall, etc.).
 pub trait OverlayApp: Default + Sized + 'static {
-    /// The app-specific message type.  Must carry the `TryInto` conversion
-    /// that `#[to_layer_message]` generates.
-    type Message: Clone
-        + std::fmt::Debug
-        + Send
-        + 'static
-        + TryInto<LayerShellCustomActionWithId, Error = Self::Message>;
+    /// The app-specific message type. See [`OverlayMessage`].
+    type Message: OverlayMessage;
 
-    /// The Wayland namespace / app-id for the layer shell surface.
+    /// The Wayland namespace / app-id (also the window title off Linux).
     fn namespace() -> &'static str;
 
     /// Construct the app's layer-shell margin-change message. Each app implements this as
     /// `Message::MarginChange(margin)` (the variant `#[to_layer_message]` generates), letting
-    /// the shared auto-stacker reposition the surface generically.
+    /// the shared auto-stacker reposition the surface generically. Linux-only: off Linux there
+    /// is no layer-shell margin to change (the window is positioned directly).
+    #[cfg(target_os = "linux")]
     fn margin_changed(margin: Margin) -> Self::Message;
 
     /// Handle a message and (optionally) return a follow-up `Task`.
@@ -86,11 +124,14 @@ pub trait OverlayApp: Default + Sized + 'static {
     }
 
     /// Layer-shell anchor edges. Default bottom + left + right (full-width strip).
+    /// Linux-only (the off-Linux window is centered horizontally near the bottom).
+    #[cfg(target_os = "linux")]
     fn anchor() -> Anchor {
         Anchor::Bottom | Anchor::Left | Anchor::Right
     }
 
     /// Whether pointer events pass through the surface. Default `true` (click-through).
+    /// Honored only on Linux; `iced` 0.14 has no click-through window setting yet.
     fn events_transparent() -> bool {
         true
     }
@@ -114,7 +155,8 @@ pub trait OverlayApp: Default + Sized + 'static {
 /// Calls [`ensure_single_instance`], then builds the standard layer-shell
 /// application with a transparent background, white text, bottom-anchored
 /// 80px panel.
-pub fn run<A: OverlayApp>() -> iced_layershell::Result {
+#[cfg(target_os = "linux")]
+pub fn run<A: OverlayApp>() -> Result {
     ensure_single_instance(A::namespace());
 
     // Stacking apps claim a slot synchronously so the surface is born at the right margin
@@ -169,7 +211,51 @@ pub fn run<A: OverlayApp>() -> iced_layershell::Result {
     .run()
 }
 
+/// Off Linux there is no layer shell: wire the app into a plain `iced`
+/// always-on-top, borderless, transparent window centered near the bottom of
+/// the screen. Auto-stacking, anchors and click-through (all layer-shell
+/// features) don't apply; the window is positioned directly. See the module
+/// docs for the macOS click-through limitation.
+#[cfg(not(target_os = "linux"))]
+pub fn run<A: OverlayApp>() -> Result {
+    use iced::window;
+
+    ensure_single_instance(A::namespace());
+
+    iced::application(A::default, update_wrapper::<A>, view_wrapper::<A>)
+        .title(A::namespace())
+        .subscription(|state: &A| state.subscription())
+        .style(|_state, _theme| iced::theme::Style {
+            background_color: iced::Color::TRANSPARENT,
+            text_color: iced::Color::WHITE,
+        })
+        .window(window::Settings {
+            size: iced::Size::new(OVERLAY_WIDTH, A::surface_height() as f32),
+            decorations: false,
+            transparent: true,
+            level: window::Level::AlwaysOnTop,
+            position: window::Position::SpecificWith(bottom_center),
+            ..Default::default()
+        })
+        .run()
+}
+
+/// Fixed width of the off-Linux overlay window (the layer-shell surface is
+/// full-width; a free-floating window needs a concrete size).
+#[cfg(not(target_os = "linux"))]
+const OVERLAY_WIDTH: f32 = 460.0;
+
+/// Horizontally center the window and pin it near the bottom edge, mirroring the
+/// layer-shell bottom strip. Receives the window and monitor sizes from `iced`.
+#[cfg(not(target_os = "linux"))]
+fn bottom_center(window: iced::Size, monitor: iced::Size) -> iced::Point {
+    let x = ((monitor.width - window.width) / 2.0).max(0.0);
+    let y = (monitor.height - window.height - stack::BASE_MARGIN as f32).max(0.0);
+    iced::Point::new(x, y)
+}
+
 /// Subscription that repositions the surface as sibling overlays open/close.
+#[cfg(target_os = "linux")]
 fn stacking_subscription<A: OverlayApp>() -> Subscription<A::Message> {
     Subscription::run(stack_reflow_recipe::<A>)
 }
@@ -177,6 +263,7 @@ fn stacking_subscription<A: OverlayApp>() -> Subscription<A::Message> {
 /// Recipe for [`stacking_subscription`]: takes the claimed slot guard once and maps the
 /// reflow margin stream into the app's own `MarginChange` message. Monomorphized per app, so
 /// its `Subscription::run` identity is stable for the process.
+#[cfg(target_os = "linux")]
 fn stack_reflow_recipe<A: OverlayApp>() -> BoxStream<'static, A::Message> {
     let guard = STACK_GUARD
         .get()
@@ -187,8 +274,8 @@ fn stack_reflow_recipe<A: OverlayApp>() -> BoxStream<'static, A::Message> {
     }
 }
 
-// Free functions with the exact signature iced_layershell::application expects,
-// forwarding to the trait methods.
+// Free functions with the exact signature the iced application builder expects,
+// forwarding to the trait methods. Shared by both backends.
 
 fn update_wrapper<A: OverlayApp>(state: &mut A, message: A::Message) -> Task<A::Message> {
     state.update(message)

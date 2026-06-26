@@ -1,13 +1,17 @@
+// The macOS build compiles without the tray; the menu/option helpers it would
+// use are then unused. Silence dead-code there rather than cfg-gate each one.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
+
 use futures::channel::mpsc;
 use futures::stream::BoxStream;
 use iced::widget::{canvas, column, container, text};
 use iced::{Color, Element, Subscription, Task};
-use iced_layershell::to_layer_message;
 
 mod audio;
 mod config;
 mod instrument;
 mod meter;
+#[cfg(target_os = "linux")]
 mod tray;
 use instrument::Instrument;
 use pitch::Note;
@@ -15,7 +19,7 @@ use pitch::Note;
 /// Selectable reference pitches (Hz) for A4, offered in the tray.
 pub const REFERENCES: [f64; 4] = [432.0, 440.0, 442.0, 443.0];
 
-#[to_layer_message]
+#[cfg_attr(target_os = "linux", iced_layershell::to_layer_message)]
 #[derive(Debug, Clone)]
 enum Message {
     /// Smoothed fundamental frequency (Hz) from the mic, or `None` on silence.
@@ -92,6 +96,7 @@ impl overlay::OverlayApp for State {
     fn namespace() -> &'static str {
         "tuner"
     }
+    #[cfg(target_os = "linux")]
     fn margin_changed(margin: (i32, i32, i32, i32)) -> Message {
         Message::MarginChange(margin)
     }
@@ -126,6 +131,9 @@ impl overlay::OverlayApp for State {
                         (self.strobe_phase + speed * 6.0).rem_euclid(meter::STROBE_BAND);
                 }
             }
+            // The `#[to_layer_message]` macro (Linux) adds variants (MarginChange, …)
+            // this catch-all absorbs; off Linux the match is already exhaustive.
+            #[cfg(target_os = "linux")]
             _ => {}
         }
         Task::none()
@@ -199,16 +207,21 @@ impl overlay::OverlayApp for State {
 
 fn event_stream() -> BoxStream<'static, Message> {
     let (tx, rx) = mpsc::unbounded::<Message>();
-    let cfg: config::TunerConfig = overlay::load_config("tuner");
 
-    ksni::TrayService::new(tray::TunerTray {
-        tx: tx.clone(),
-        enabled: cfg.enabled,
-        style: meter::MeterStyle::from_idx(cfg.meter_style_idx),
-        a4_hz: cfg.a4_hz,
-        instrument: Instrument::from_idx(cfg.instrument_idx),
-    })
-    .spawn();
+    // The tray is Linux-only (ksni / StatusNotifierItem over D-Bus). Off Linux the
+    // overlay runs with the persisted config and no menu — see CLAUDE.md.
+    #[cfg(target_os = "linux")]
+    {
+        let cfg: config::TunerConfig = overlay::load_config("tuner");
+        ksni::TrayService::new(tray::TunerTray {
+            tx: tx.clone(),
+            enabled: cfg.enabled,
+            style: meter::MeterStyle::from_idx(cfg.meter_style_idx),
+            a4_hz: cfg.a4_hz,
+            instrument: Instrument::from_idx(cfg.instrument_idx),
+        })
+        .spawn();
+    }
 
     std::thread::spawn(move || audio::run(tx));
 
@@ -228,7 +241,7 @@ fn strobe_tick_stream() -> BoxStream<'static, Message> {
     Box::pin(rx)
 }
 
-fn main() -> iced_layershell::Result {
+fn main() -> overlay::Result {
     overlay::run::<State>()
 }
 
