@@ -120,6 +120,34 @@ impl Default for State {
 }
 
 impl State {
+    /// Apply edited settings *in place*, preserving the live now-playing session
+    /// (matched song, sync, taps) — unlike a full `State::default()` rebuild. Pushes
+    /// the settings onto the process-global `SharedClock` (which `State` only holds a
+    /// clone of, so a rebuild wouldn't re-sync it) the same way the per-message
+    /// handlers do.
+    fn apply_config(&mut self, cfg: MetronomeConfig) {
+        self.enabled = cfg.enabled;
+        self.running = cfg.running;
+        self.beats_per_bar = cfg.beats_per_bar;
+        self.audible = cfg.audible;
+        self.flash = cfg.flash;
+        self.offsets = cfg.offsets;
+        self.source = Source::from_idx(cfg.source_idx);
+        self.bpm = cfg.bpm;
+        self.manual_bpm = cfg.bpm;
+        self.clock.set_beats_per_bar(self.beats_per_bar);
+        self.clock.set_audible(self.audible);
+        self.clock.set_running(self.running);
+        match self.source {
+            Source::Manual => self.clock.set_bpm(self.manual_bpm),
+            Source::Song => self.sync_to_song(),
+            Source::Detect => {}
+        }
+        if self.running && self.source != Source::Song {
+            self.clock.anchor_to(Instant::now());
+        }
+    }
+
     fn persist(&self) {
         overlay::save(
             APP,
@@ -327,19 +355,7 @@ fn update(state: &mut State, message: Message) {
             }
         }
         Message::ResetDefaults => {
-            overlay::save(APP, &MetronomeConfig::default());
-            *state = State::default();
-            // The clock is a process-global; `State::default()` only clones it, so
-            // push the restored (Manual-source) defaults onto it explicitly or the
-            // audio click would keep its old tempo. Transient now-playing state
-            // re-fills on the next player event.
-            state.clock.set_beats_per_bar(state.beats_per_bar);
-            state.clock.set_audible(state.audible);
-            state.clock.set_bpm(state.manual_bpm);
-            state.clock.set_running(state.running);
-            if state.running {
-                state.clock.anchor_to(now);
-            }
+            state.apply_config(overlay::reset_defaults(APP));
         }
         _ => {}
     }

@@ -354,8 +354,7 @@ impl overlay::OverlayApp for State {
                 }
             }
             Message::ResetDefaults => {
-                overlay::save(APP, &VocalizeConfig::default());
-                *self = State::default();
+                self.apply_config(overlay::reset_defaults(APP));
             }
             // Absorbs the guarded `Replay` (when disabled) plus, on Linux, the extra
             // variants the `#[to_layer_message]` macro injects (MarginChange, …).

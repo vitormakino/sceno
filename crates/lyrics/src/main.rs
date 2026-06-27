@@ -101,6 +101,21 @@ impl State {
             .map(|s| s.current_time() + self.current_offset_ms() / 1000.0)
     }
 
+    /// Apply edited settings *in place*, preserving the live now-playing session
+    /// (cues, sync, track) — unlike a full `State::default()` rebuild, which would
+    /// blank the overlay until the next player event (never, if paused).
+    fn apply_config(&mut self, cfg: SavedConfig) {
+        self.enabled = cfg.enabled;
+        self.font_size = FontSize::from_idx(cfg.font_size_idx);
+        self.offsets = cfg.offsets;
+        self.show_next = cfg.show_next;
+        if self.enabled {
+            apply_timeline_caption(self);
+        } else {
+            self.caption.clear();
+        }
+    }
+
     /// Persist font size, enabled, the per-song offset map, and lookahead toggle.
     fn persist(&self) {
         overlay::save(
@@ -364,10 +379,7 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
             apply_timeline_caption(state);
         }
         Message::ResetDefaults => {
-            overlay::save(APP, &SavedConfig::default());
-            // Rebuild from the fresh config; transient now-playing state (caption,
-            // cues, sync) re-fills on the next player event.
-            *state = State::default();
+            state.apply_config(overlay::reset_defaults(APP));
         }
         _ => {}
     }

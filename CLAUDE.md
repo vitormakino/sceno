@@ -108,11 +108,15 @@ usable config surface there, `tuner`/`vocalize` seed it on first run (`load_or_s
 edit is ignored, not read as "reset to defaults" — and calls `apply_config` to update only the
 settings fields *in place* when they actually differ from the running ones, preserving live
 state and not bouncing on a self-write). Every app also gained a tray
-**"Restaurar padrões"** item (a `ResetDefaults` message: write `Config::default()` then
-`*self = State::default()`); `metronome` re-pushes the restored tempo onto its process-global
-`SharedClock` since `State::default()` only clones it. `lyrics`/`karaoke`/`metronome` stay
-Linux-only (they need the `mpris` now-playing source) and only get seed + reset, not the
-watcher (they always have a tray). CI verifies the macOS subset via the `check-macos` job
+**"Restaurar padrões"** item (a `ResetDefaults` message). Both reset and live-reload route
+through the same per-app `apply_config(cfg)` — it mutates only the settings fields *in place*
+(no `*self = State::default()`), so the live session survives: lyrics/karaoke keep their cues
+and now-playing match, vocalize doesn't re-randomize or blare the tone, karaoke rescans the
+library only if its directory changed, and `metronome` pushes the new tempo onto its
+process-global `SharedClock` (which `State` only holds a clone of). Reset writes the defaults
+via `overlay::reset_defaults::<Config>(app)` and feeds the result straight to `apply_config`.
+`lyrics`/`karaoke`/`metronome` stay Linux-only (they need the `mpris` now-playing source) and
+only get seed + reset, not the watcher (they always have a tray). CI verifies the macOS subset via the `check-macos` job
 (`overlay`, `pitch`, `tuner`, `vocalize`). When editing a `tuner`/`vocalize` `update` match,
 a `_ => {}` arm that becomes unreachable off Linux must be `#[cfg(target_os = "linux")]`-gated
 (unless a guarded arm keeps it reachable). See `docs/plans/2026-06-26-macos-compat.md`.

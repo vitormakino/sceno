@@ -160,8 +160,7 @@ impl overlay::OverlayApp for State {
                 }
             }
             Message::ResetDefaults => {
-                overlay::save("tuner", &config::TunerConfig::default());
-                *self = State::default();
+                self.apply_config(overlay::reset_defaults("tuner"));
             }
             // The `#[to_layer_message]` macro (Linux) adds variants (MarginChange, …)
             // this catch-all absorbs; off Linux the match is already exhaustive.

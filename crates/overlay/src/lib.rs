@@ -12,7 +12,8 @@ mod stack;
 mod trace;
 pub use paths::{cache_dir, config_dir, data_dir};
 pub use settings::{
-    FontSize, load_config, load_config_checked, load_or_seed, save, watch_config_stream,
+    FontSize, load_config, load_config_checked, load_or_seed, reset_defaults, save,
+    watch_config_stream,
 };
 pub use stack::{Margin, margin_for_slot};
 pub use trace::{debug, debug_enabled};

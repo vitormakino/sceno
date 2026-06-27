@@ -70,6 +70,21 @@ impl Default for State {
 }
 
 impl State {
+    /// Apply edited settings *in place*, preserving the live now-playing session
+    /// (matched song, sync) — unlike a full `State::default()` rebuild, which would
+    /// blank the lane until the next player event. Rescans the library only when
+    /// its directory actually changed, so a routine edit never blocks the UI thread
+    /// on a directory walk.
+    fn apply_config(&mut self, cfg: KaraokeConfig) {
+        self.enabled = cfg.enabled;
+        self.offset_ms = cfg.offset_ms;
+        if cfg.library_dir != self.library_dir {
+            self.library_dir = cfg.library_dir.clone();
+            let dir = self.library_dir.clone().or_else(|| overlay::data_dir(APP));
+            self.library = dir.map(|d| media::library::scan(&d)).unwrap_or_default();
+        }
+    }
+
     fn persist(&self) {
         overlay::save(
             APP,
@@ -216,10 +231,7 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
         Message::PitchUpdate(n) => state.current_note = n,
         Message::Tick => {}
         Message::ResetDefaults => {
-            overlay::save(APP, &KaraokeConfig::default());
-            // Rebuild from the fresh config (rescans the library); transient
-            // now-playing state re-fills on the next player event.
-            *state = State::default();
+            state.apply_config(overlay::reset_defaults(APP));
         }
         _ => {}
     }

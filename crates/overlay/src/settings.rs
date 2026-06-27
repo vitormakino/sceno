@@ -71,6 +71,16 @@ where
     load_config(app)
 }
 
+/// Overwrite `app`'s config with the type's defaults and return them, for a
+/// "restore defaults" action. The caller then applies the returned config to its
+/// running state (typically via an `apply_config`), so the reset is a normal
+/// settings change rather than a full state rebuild.
+pub fn reset_defaults<T: Default + serde::Serialize>(app: &str) -> T {
+    let cfg = T::default();
+    save(app, &cfg);
+    cfg
+}
+
 /// Background stream that emits `on_change()` whenever `app`'s `config.json`
 /// changes on disk (created, edited, or removed). Polls the file's mtime ~1 Hz
 /// on its own thread — one `stat` per second, negligible cost — rather than
