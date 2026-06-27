@@ -43,6 +43,8 @@ enum Message {
     /// Toggle the dimmed lookahead (next) line.
     SetShowNext(bool),
     TimelineTick,
+    /// Rewrite the config with defaults and rebuild from it (tray "Restaurar padrões").
+    ResetDefaults,
 }
 
 struct State {
@@ -64,7 +66,7 @@ struct State {
 
 impl Default for State {
     fn default() -> Self {
-        let cfg: SavedConfig = overlay::load_config(APP);
+        let cfg: SavedConfig = overlay::load_or_seed(APP);
         State {
             caption: String::new(),
             enabled: cfg.enabled,
@@ -97,6 +99,21 @@ impl State {
         self.timeline_sync
             .as_ref()
             .map(|s| s.current_time() + self.current_offset_ms() / 1000.0)
+    }
+
+    /// Apply edited settings *in place*, preserving the live now-playing session
+    /// (cues, sync, track) — unlike a full `State::default()` rebuild, which would
+    /// blank the overlay until the next player event (never, if paused).
+    fn apply_config(&mut self, cfg: SavedConfig) {
+        self.enabled = cfg.enabled;
+        self.font_size = FontSize::from_idx(cfg.font_size_idx);
+        self.offsets = cfg.offsets;
+        self.show_next = cfg.show_next;
+        if self.enabled {
+            apply_timeline_caption(self);
+        } else {
+            self.caption.clear();
+        }
     }
 
     /// Persist font size, enabled, the per-song offset map, and lookahead toggle.
@@ -247,6 +264,14 @@ impl ksni::Tray for LyricsTray {
             .into(),
             MenuItem::Separator,
             StandardItem {
+                label: "Restaurar padrões".into(),
+                activate: Box::new(|this: &mut Self| {
+                    let _ = this.tx.unbounded_send(Message::ResetDefaults);
+                }),
+                ..Default::default()
+            }
+            .into(),
+            StandardItem {
                 label: "Sair".into(),
                 icon_name: "application-exit".into(),
                 activate: Box::new(|_| std::process::exit(0)),
@@ -352,6 +377,9 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
         }
         Message::TimelineTick if state.enabled => {
             apply_timeline_caption(state);
+        }
+        Message::ResetDefaults => {
+            state.apply_config(overlay::reset_defaults(APP));
         }
         _ => {}
     }

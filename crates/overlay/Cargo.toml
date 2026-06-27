@@ -9,10 +9,13 @@ repository.workspace = true
 
 [dependencies]
 iced.workspace = true
-iced_layershell.workspace = true
-ksni.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 libc.workspace = true
-dbus.workspace = true
 futures.workspace = true
+
+# Wayland layer-shell + D-Bus auto-stacking are Linux-only. On other platforms
+# (macOS) the shell falls back to a plain `iced` always-on-top window.
+[target.'cfg(target_os = "linux")'.dependencies]
+iced_layershell.workspace = true
+dbus.workspace = true

@@ -11,9 +11,13 @@ repository.workspace = true
 overlay = { path = "../overlay" }
 pitch = { path = "../pitch" }
 iced = { workspace = true, features = ["canvas"] }
-iced_layershell.workspace = true
 futures.workspace = true
 serde.workspace = true
+
+# The system tray (ksni) and the `#[to_layer_message]` macro (iced_layershell)
+# are Linux-only; off Linux the overlay runs without a tray (see CLAUDE.md).
+[target.'cfg(target_os = "linux")'.dependencies]
+iced_layershell.workspace = true
 ksni.workspace = true
 
 [dev-dependencies]

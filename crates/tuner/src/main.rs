@@ -1,13 +1,17 @@
+// The macOS build compiles without the tray; the menu/option helpers it would
+// use are then unused. Silence dead-code there rather than cfg-gate each one.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
+
 use futures::channel::mpsc;
 use futures::stream::BoxStream;
 use iced::widget::{canvas, column, container, text};
 use iced::{Color, Element, Subscription, Task};
-use iced_layershell::to_layer_message;
 
 mod audio;
 mod config;
 mod instrument;
 mod meter;
+#[cfg(target_os = "linux")]
 mod tray;
 use instrument::Instrument;
 use pitch::Note;
@@ -15,7 +19,7 @@ use pitch::Note;
 /// Selectable reference pitches (Hz) for A4, offered in the tray.
 pub const REFERENCES: [f64; 4] = [432.0, 440.0, 442.0, 443.0];
 
-#[to_layer_message]
+#[cfg_attr(target_os = "linux", iced_layershell::to_layer_message)]
 #[derive(Debug, Clone)]
 enum Message {
     /// Smoothed fundamental frequency (Hz) from the mic, or `None` on silence.
@@ -27,6 +31,10 @@ enum Message {
     /// Change the instrument tuning preset.
     SetInstrument(Instrument),
     StrobeTick,
+    /// The on-disk config changed (external edit); reload if it actually differs.
+    ReloadConfig,
+    /// Rewrite the config with defaults and rebuild from it (tray "Restaurar padrões").
+    ResetDefaults,
 }
 
 struct State {
@@ -43,7 +51,7 @@ struct State {
 
 impl Default for State {
     fn default() -> Self {
-        let cfg: config::TunerConfig = overlay::load_config("tuner");
+        let cfg: config::TunerConfig = overlay::load_or_seed("tuner");
         State {
             last_freq: None,
             note: None,
@@ -74,16 +82,30 @@ impl State {
             .map(|f| note_from(f, self.a4_hz, self.instrument));
     }
 
+    /// The current settings as a serializable config (for persisting / comparing).
+    fn current_config(&self) -> config::TunerConfig {
+        config::TunerConfig {
+            meter_style_idx: self.style.index(),
+            enabled: self.enabled,
+            a4_hz: self.a4_hz,
+            instrument_idx: self.instrument.index(),
+        }
+    }
+
+    /// Apply edited settings *in place*, preserving live state (`last_freq`, the
+    /// strobe phase) — unlike a full `State::default()` rebuild, which would drop
+    /// the current readout. Re-maps the note so a reference/instrument change shows
+    /// immediately.
+    fn apply_config(&mut self, cfg: config::TunerConfig) {
+        self.enabled = cfg.enabled;
+        self.style = meter::MeterStyle::from_idx(cfg.meter_style_idx);
+        self.a4_hz = cfg.a4_hz;
+        self.instrument = Instrument::from_idx(cfg.instrument_idx);
+        self.remap();
+    }
+
     fn persist(&self) {
-        overlay::save(
-            "tuner",
-            &config::TunerConfig {
-                meter_style_idx: self.style.index(),
-                enabled: self.enabled,
-                a4_hz: self.a4_hz,
-                instrument_idx: self.instrument.index(),
-            },
-        );
+        overlay::save("tuner", &self.current_config());
     }
 }
 
@@ -92,6 +114,7 @@ impl overlay::OverlayApp for State {
     fn namespace() -> &'static str {
         "tuner"
     }
+    #[cfg(target_os = "linux")]
     fn margin_changed(margin: (i32, i32, i32, i32)) -> Message {
         Message::MarginChange(margin)
     }
@@ -126,6 +149,22 @@ impl overlay::OverlayApp for State {
                         (self.strobe_phase + speed * 6.0).rem_euclid(meter::STROBE_BAND);
                 }
             }
+            Message::ReloadConfig => {
+                // A watcher fires on every mtime bump, including our own persists.
+                // Ignore a missing/malformed edit (don't reset to defaults), and
+                // only apply when the file's settings actually differ from ours.
+                if let Some(on_disk) = overlay::load_config_checked::<config::TunerConfig>("tuner")
+                    && on_disk != self.current_config()
+                {
+                    self.apply_config(on_disk);
+                }
+            }
+            Message::ResetDefaults => {
+                self.apply_config(overlay::reset_defaults("tuner"));
+            }
+            // The `#[to_layer_message]` macro (Linux) adds variants (MarginChange, …)
+            // this catch-all absorbs; off Linux the match is already exhaustive.
+            #[cfg(target_os = "linux")]
             _ => {}
         }
         Task::none()
@@ -188,27 +227,39 @@ impl overlay::OverlayApp for State {
     }
     fn subscription(&self) -> Subscription<Message> {
         let events = Subscription::run(event_stream);
+        let watch = Subscription::run(config_watch_stream);
         if self.enabled && self.style == meter::MeterStyle::Strobe {
             let ticks = Subscription::run(strobe_tick_stream);
-            Subscription::batch([events, ticks])
+            Subscription::batch([events, watch, ticks])
         } else {
-            events
+            Subscription::batch([events, watch])
         }
     }
 }
 
+/// Emits `ReloadConfig` when the on-disk config changes — makes external edits
+/// to `config.json` apply live (the only config surface on macOS, no tray).
+fn config_watch_stream() -> BoxStream<'static, Message> {
+    overlay::watch_config_stream("tuner", || Message::ReloadConfig)
+}
+
 fn event_stream() -> BoxStream<'static, Message> {
     let (tx, rx) = mpsc::unbounded::<Message>();
-    let cfg: config::TunerConfig = overlay::load_config("tuner");
 
-    ksni::TrayService::new(tray::TunerTray {
-        tx: tx.clone(),
-        enabled: cfg.enabled,
-        style: meter::MeterStyle::from_idx(cfg.meter_style_idx),
-        a4_hz: cfg.a4_hz,
-        instrument: Instrument::from_idx(cfg.instrument_idx),
-    })
-    .spawn();
+    // The tray is Linux-only (ksni / StatusNotifierItem over D-Bus). Off Linux the
+    // overlay runs with the persisted config and no menu — see CLAUDE.md.
+    #[cfg(target_os = "linux")]
+    {
+        let cfg: config::TunerConfig = overlay::load_config("tuner");
+        ksni::TrayService::new(tray::TunerTray {
+            tx: tx.clone(),
+            enabled: cfg.enabled,
+            style: meter::MeterStyle::from_idx(cfg.meter_style_idx),
+            a4_hz: cfg.a4_hz,
+            instrument: Instrument::from_idx(cfg.instrument_idx),
+        })
+        .spawn();
+    }
 
     std::thread::spawn(move || audio::run(tx));
 
@@ -228,7 +279,7 @@ fn strobe_tick_stream() -> BoxStream<'static, Message> {
     Box::pin(rx)
 }
 
-fn main() -> iced_layershell::Result {
+fn main() -> overlay::Result {
     overlay::run::<State>()
 }
 

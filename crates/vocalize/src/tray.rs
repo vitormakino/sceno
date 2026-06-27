@@ -240,6 +240,14 @@ impl ksni::Tray for VocalizeTray {
             .into(),
             MenuItem::Separator,
             StandardItem {
+                label: "Restaurar padrões".into(),
+                activate: Box::new(|this: &mut Self| {
+                    let _ = this.tx.unbounded_send(Message::ResetDefaults);
+                }),
+                ..Default::default()
+            }
+            .into(),
+            StandardItem {
                 label: "Sair".into(),
                 icon_name: "application-exit".into(),
                 activate: Box::new(|_| std::process::exit(0)),
