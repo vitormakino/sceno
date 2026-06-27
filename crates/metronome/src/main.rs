@@ -60,6 +60,8 @@ enum Message {
     NudgeOffset(i64),
     /// Drop the current song's phase offset.
     ClearOffset,
+    /// Rewrite the config with defaults and rebuild from it (tray "Restaurar padrões").
+    ResetDefaults,
 }
 
 struct State {
@@ -90,7 +92,7 @@ struct State {
 
 impl Default for State {
     fn default() -> Self {
-        let cfg: MetronomeConfig = overlay::load_config(APP);
+        let cfg: MetronomeConfig = overlay::load_or_seed(APP);
         let library = overlay::data_dir(APP)
             .map(|d| media::library::scan(&d))
             .unwrap_or_default();
@@ -322,6 +324,21 @@ fn update(state: &mut State, message: Message) {
                 if state.source == Source::Song {
                     state.sync_to_song();
                 }
+            }
+        }
+        Message::ResetDefaults => {
+            overlay::save(APP, &MetronomeConfig::default());
+            *state = State::default();
+            // The clock is a process-global; `State::default()` only clones it, so
+            // push the restored (Manual-source) defaults onto it explicitly or the
+            // audio click would keep its old tempo. Transient now-playing state
+            // re-fills on the next player event.
+            state.clock.set_beats_per_bar(state.beats_per_bar);
+            state.clock.set_audible(state.audible);
+            state.clock.set_bpm(state.manual_bpm);
+            state.clock.set_running(state.running);
+            if state.running {
+                state.clock.anchor_to(now);
             }
         }
         _ => {}

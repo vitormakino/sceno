@@ -31,6 +31,8 @@ enum Message {
     PitchUpdate(Option<pitch::Note>),
     /// Render tick to advance the scroll while playing.
     Tick,
+    /// Rewrite the config with defaults and rebuild from it (tray "Restaurar padrões").
+    ResetDefaults,
 }
 
 struct State {
@@ -49,7 +51,7 @@ struct State {
 
 impl Default for State {
     fn default() -> Self {
-        let cfg: KaraokeConfig = overlay::load_config(APP);
+        let cfg: KaraokeConfig = overlay::load_or_seed(APP);
         let library_dir = cfg.library_dir.clone();
         let dir = library_dir.clone().or_else(|| overlay::data_dir(APP));
         let library = dir.map(|d| media::library::scan(&d)).unwrap_or_default();
@@ -213,6 +215,12 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
         }
         Message::PitchUpdate(n) => state.current_note = n,
         Message::Tick => {}
+        Message::ResetDefaults => {
+            overlay::save(APP, &KaraokeConfig::default());
+            // Rebuild from the fresh config (rescans the library); transient
+            // now-playing state re-fills on the next player event.
+            *state = State::default();
+        }
         _ => {}
     }
     Task::none()

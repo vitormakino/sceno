@@ -50,6 +50,10 @@ enum Message {
     PitchUpdate(Option<f64>),
     /// 33 ms UI tick driving listen/sustain timing and the success flash.
     Tick,
+    /// The on-disk config changed (external edit); reload if it actually differs.
+    ReloadConfig,
+    /// Rewrite the config with defaults and rebuild from it (tray "Restaurar padrões").
+    ResetDefaults,
 }
 
 struct State {
@@ -84,7 +88,7 @@ struct State {
 
 impl Default for State {
     fn default() -> Self {
-        let cfg: VocalizeConfig = overlay::load_config(APP);
+        let cfg: VocalizeConfig = overlay::load_or_seed(APP);
         let scale = Scale {
             root: cfg.scale_root,
             kind: ScaleKind::from_idx(cfg.scale_kind_idx),
@@ -189,21 +193,56 @@ impl State {
         self.advance();
     }
 
+    /// Apply edited settings *in place*, preserving the live exercise — unlike a
+    /// full `State::default()` rebuild, which would jump to a new random target and
+    /// blare the reference tone on every edit. Only a structural change
+    /// (root/scale/mode) picks a fresh item, and it does so **silently** (a
+    /// background file edit shouldn't sound the tone); scalar tweaks (tolerance,
+    /// sustain, timbre, …) just re-arm the matcher on the current target.
+    fn apply_config(&mut self, cfg: VocalizeConfig) {
+        let structural = self.scale.root != cfg.scale_root
+            || self.scale.kind.index() != cfg.scale_kind_idx
+            || self.mode.index() != cfg.mode_idx;
+        self.scale.root = cfg.scale_root;
+        self.scale.kind = ScaleKind::from_idx(cfg.scale_kind_idx);
+        self.mode = Mode::from_idx(cfg.mode_idx);
+        self.play_style = PlayStyle::from_idx(cfg.play_style_idx);
+        self.timbre = Timbre::from_idx(cfg.timbre_idx);
+        self.cents_window = cfg.cents_window;
+        self.sustain_ms = cfg.sustain_ms as f64;
+        self.audible = cfg.audible;
+        self.tone.set_audible(cfg.audible);
+        self.enabled = cfg.enabled;
+        if structural {
+            // The target depends on the scale/mode; pick a fresh item, but don't
+            // sound the tone (this is a silent config edit, not a user action).
+            self.prev_degree = usize::MAX;
+            let degree = next_degree(&mut self.rng, self.scale.degree_count(), self.prev_degree);
+            self.prev_degree = degree;
+            self.item = exercise::item_at(&self.scale, self.mode, degree);
+            self.present_until = None;
+        }
+        // Re-arm the matcher for the (possibly new) item under the new tolerance.
+        self.matcher = Matcher::new(&self.item, self.cents_window, self.sustain_ms);
+    }
+
+    /// The current settings as a serializable config (for persisting / comparing).
+    fn current_config(&self) -> VocalizeConfig {
+        VocalizeConfig {
+            enabled: self.enabled,
+            audible: self.audible,
+            scale_root: self.scale.root,
+            scale_kind_idx: self.scale.kind.index(),
+            mode_idx: self.mode.index(),
+            play_style_idx: self.play_style.index(),
+            timbre_idx: self.timbre.index(),
+            cents_window: self.cents_window,
+            sustain_ms: self.sustain_ms as u64,
+        }
+    }
+
     fn persist(&self) {
-        overlay::save(
-            APP,
-            &VocalizeConfig {
-                enabled: self.enabled,
-                audible: self.audible,
-                scale_root: self.scale.root,
-                scale_kind_idx: self.scale.kind.index(),
-                mode_idx: self.mode.index(),
-                play_style_idx: self.play_style.index(),
-                timbre_idx: self.timbre.index(),
-                cents_window: self.cents_window,
-                sustain_ms: self.sustain_ms as u64,
-            },
-        );
+        overlay::save(APP, &self.current_config());
     }
 }
 
@@ -304,6 +343,20 @@ impl overlay::OverlayApp for State {
                 );
                 self.present_until = Some(Instant::now() + present);
             }
+            Message::ReloadConfig => {
+                // A watcher fires on every mtime bump, including our own persists.
+                // Ignore a missing/malformed edit (don't reset to defaults), and
+                // only apply when the file's settings actually differ from ours.
+                if let Some(on_disk) = overlay::load_config_checked::<VocalizeConfig>(APP)
+                    && on_disk != self.current_config()
+                {
+                    self.apply_config(on_disk);
+                }
+            }
+            Message::ResetDefaults => {
+                overlay::save(APP, &VocalizeConfig::default());
+                *self = State::default();
+            }
             // Absorbs the guarded `Replay` (when disabled) plus, on Linux, the extra
             // variants the `#[to_layer_message]` macro injects (MarginChange, …).
             _ => {}
@@ -375,12 +428,19 @@ impl overlay::OverlayApp for State {
     }
     fn subscription(&self) -> Subscription<Message> {
         let events = Subscription::run(event_stream);
+        let watch = Subscription::run(config_watch_stream);
         if self.enabled {
-            Subscription::batch([events, Subscription::run(tick_stream)])
+            Subscription::batch([events, watch, Subscription::run(tick_stream)])
         } else {
-            events
+            Subscription::batch([events, watch])
         }
     }
+}
+
+/// Emits `ReloadConfig` when the on-disk config changes — makes external edits
+/// to `config.json` apply live (the only config surface on macOS, no tray).
+fn config_watch_stream() -> BoxStream<'static, Message> {
+    overlay::watch_config_stream(APP, || Message::ReloadConfig)
 }
 
 fn event_stream() -> BoxStream<'static, Message> {

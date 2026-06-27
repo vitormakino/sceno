@@ -12,9 +12,12 @@ system. Four shared library crates + five app binaries:
 - **`overlay`** (lib) — the shared shell. The `OverlayApp` trait (`namespace`, `update`,
   `view`, `subscription`, + default-implemented surface geometry: `surface_height`, `anchor`,
   `events_transparent`, `stacks`, `initial_margin`) + `overlay::run::<A>()` wires an app into
-  `iced_layershell`. Also home to generic config I/O (`load_config::<T>`/`save`), XDG paths
-  (`config_dir`/`cache_dir`/`data_dir`), `ensure_single_instance`, event-driven auto-stacking,
-  and `SCENO_DEBUG` tracing (`overlay::debug(tag, args)`).
+  `iced_layershell`. Also home to generic config I/O (`load_config::<T>`/`save`, plus
+  `load_or_seed::<T>` which materializes a default `config.json` on first run, and
+  `watch_config_stream` which polls the config's mtime ~1 Hz and emits a message on change so
+  external edits apply live), XDG paths (`config_dir`/`cache_dir`/`data_dir`),
+  `ensure_single_instance`, event-driven auto-stacking, and `SCENO_DEBUG` tracing
+  (`overlay::debug(tag, args)`).
 - **`pitch`** (lib) — mic capture + pitch math: `note` (`frequency_to_note`,
   `note_to_frequency`, `is_in_tune`, `Note` with a `midi` field), `smooth` (`Smoother`),
   `detect_frequency` (McLeod/MPM), `capture::run_capture` (cpal stream + 50 ms loop, calls a
@@ -98,12 +101,21 @@ Linux-gated: `iced_layershell`/`dbus` deps, `OverlayApp::{margin_changed, anchor
 auto-stacking in `stack.rs`, and the `OverlayMessage` `TryInto<…>` bound. Apps return
 `overlay::Result` (a platform alias) from `main`. The system tray (`ksni`) is Linux-only;
 on macOS the overlay runs from the persisted config with **no tray and no click-through**
-(`iced` 0.14 has no `cursor_hittest`) — both are documented follow-ups. `lyrics`/`karaoke`/
-`metronome` stay Linux-only (they need the `mpris` now-playing source). CI verifies the
-macOS subset via the `check-macos` job (`overlay`, `pitch`, `tuner`, `vocalize`). When
-editing a `tuner`/`vocalize` `update` match, a `_ => {}` arm that becomes unreachable off
-Linux must be `#[cfg(target_os = "linux")]`-gated (unless a guarded arm keeps it reachable).
-See `docs/plans/2026-06-26-macos-compat.md`.
+(`iced` 0.14 has no `cursor_hittest`) — both are documented follow-ups. To make the JSON a
+usable config surface there, `tuner`/`vocalize` seed it on first run (`load_or_seed`) and
+**watch it live** (a `Subscription::run(config_watch_stream)` mapping mtime bumps to a
+`ReloadConfig` message; the handler reads via `load_config_checked` — so a missing/malformed
+edit is ignored, not read as "reset to defaults" — and calls `apply_config` to update only the
+settings fields *in place* when they actually differ from the running ones, preserving live
+state and not bouncing on a self-write). Every app also gained a tray
+**"Restaurar padrões"** item (a `ResetDefaults` message: write `Config::default()` then
+`*self = State::default()`); `metronome` re-pushes the restored tempo onto its process-global
+`SharedClock` since `State::default()` only clones it. `lyrics`/`karaoke`/`metronome` stay
+Linux-only (they need the `mpris` now-playing source) and only get seed + reset, not the
+watcher (they always have a tray). CI verifies the macOS subset via the `check-macos` job
+(`overlay`, `pitch`, `tuner`, `vocalize`). When editing a `tuner`/`vocalize` `update` match,
+a `_ => {}` arm that becomes unreachable off Linux must be `#[cfg(target_os = "linux")]`-gated
+(unless a guarded arm keeps it reachable). See `docs/plans/2026-06-26-macos-compat.md`.
 
 ## Tuner meter styles
 
@@ -163,5 +175,16 @@ cargo +stable test --workspace
 Note: clippy `--all-targets` flags `dead_code` on the **bin** target for code only used by
 later commits/tests; when splitting work across commits, the symbol becomes "used" once its
 consumer lands — don't paper over it with `#[allow(dead_code)]`.
+
+**On macOS**, a bare `cargo build` fails: `members = ["crates/*"]` pulls the Linux-only
+crates (`lyrics`/`karaoke`/`metronome` need MPRIS/dbus/wayland), and `members`/`default-members`
+can't be cfg-gated per OS. Build the portable subset only — `.cargo/config.toml` provides
+aliases matching the CI `check-macos` job (append `-- -D warnings` to match its clippy):
+
+```sh
+cargo mac          # build -p overlay -p pitch -p tuner -p vocalize
+cargo mac-clippy    # clippy … --all-targets
+cargo mac-test      # test …
+```
 
 System dev packages (Linux): `libdbus-1-dev libasound2-dev libwayland-dev libxkbcommon-dev`.

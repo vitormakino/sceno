@@ -43,6 +43,8 @@ enum Message {
     /// Toggle the dimmed lookahead (next) line.
     SetShowNext(bool),
     TimelineTick,
+    /// Rewrite the config with defaults and rebuild from it (tray "Restaurar padrões").
+    ResetDefaults,
 }
 
 struct State {
@@ -64,7 +66,7 @@ struct State {
 
 impl Default for State {
     fn default() -> Self {
-        let cfg: SavedConfig = overlay::load_config(APP);
+        let cfg: SavedConfig = overlay::load_or_seed(APP);
         State {
             caption: String::new(),
             enabled: cfg.enabled,
@@ -247,6 +249,14 @@ impl ksni::Tray for LyricsTray {
             .into(),
             MenuItem::Separator,
             StandardItem {
+                label: "Restaurar padrões".into(),
+                activate: Box::new(|this: &mut Self| {
+                    let _ = this.tx.unbounded_send(Message::ResetDefaults);
+                }),
+                ..Default::default()
+            }
+            .into(),
+            StandardItem {
                 label: "Sair".into(),
                 icon_name: "application-exit".into(),
                 activate: Box::new(|_| std::process::exit(0)),
@@ -352,6 +362,12 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
         }
         Message::TimelineTick if state.enabled => {
             apply_timeline_caption(state);
+        }
+        Message::ResetDefaults => {
+            overlay::save(APP, &SavedConfig::default());
+            // Rebuild from the fresh config; transient now-playing state (caption,
+            // cues, sync) re-fills on the next player event.
+            *state = State::default();
         }
         _ => {}
     }
