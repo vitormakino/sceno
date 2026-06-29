@@ -45,6 +45,8 @@ enum Message {
     SetTimbre(tone::Timbre),
     SetCents(f64),
     SetSustain(f64),
+    /// Toggle octave-strict matching (vs. octave-folded).
+    SetOctaveStrict(bool),
     /// Replay the current item's reference tone.
     Replay,
     /// Smoothed fundamental frequency (Hz) from the mic, or `None` on silence.
@@ -69,6 +71,8 @@ struct State {
     timbre: Timbre,
     cents_window: f64,
     sustain_ms: f64,
+    /// Require the exact octave (vs. octave-folded pitch-class matching).
+    octave_strict: bool,
     /// Target MIDI notes of the current item (playback octave).
     item: Vec<i64>,
     matcher: Matcher,
@@ -106,10 +110,11 @@ impl Default for State {
         let timbre = Timbre::from_idx(cfg.timbre_idx);
         let cents_window = cfg.cents_window;
         let sustain_ms = cfg.sustain_ms as f64;
+        let octave_strict = cfg.octave_strict;
         let mut rng = seed();
         let degree = next_degree(&mut rng, scale.degree_count(), usize::MAX);
         let item = exercise::item_at(&scale, mode, degree);
-        let matcher = Matcher::new(&item, cents_window, sustain_ms);
+        let matcher = Matcher::new(&item, cents_window, sustain_ms, octave_strict);
         let tone = tone::Tone::new(cfg.audible);
         let present = if cfg.enabled {
             tone.play(&freqs_of(&item), play_style == PlayStyle::Together, timbre)
@@ -124,6 +129,7 @@ impl Default for State {
             timbre,
             cents_window,
             sustain_ms,
+            octave_strict,
             item,
             matcher,
             prev_degree: degree,
@@ -185,7 +191,12 @@ impl State {
         let degree = next_degree(&mut self.rng, self.scale.degree_count(), self.prev_degree);
         self.prev_degree = degree;
         self.item = exercise::item_at(&self.scale, self.mode, degree);
-        self.matcher = Matcher::new(&self.item, self.cents_window, self.sustain_ms);
+        self.matcher = Matcher::new(
+            &self.item,
+            self.cents_window,
+            self.sustain_ms,
+            self.octave_strict,
+        );
         let present = if self.enabled {
             self.tone.play(
                 &freqs_of(&self.item),
@@ -220,6 +231,7 @@ impl State {
         self.timbre = Timbre::from_idx(cfg.timbre_idx);
         self.cents_window = cfg.cents_window;
         self.sustain_ms = cfg.sustain_ms as f64;
+        self.octave_strict = cfg.octave_strict;
         self.audible = cfg.audible;
         self.tone.set_audible(cfg.audible);
         self.enabled = cfg.enabled;
@@ -234,8 +246,13 @@ impl State {
             // A silent structural change arms a fresh target immediately.
             self.item_armed_at = Instant::now();
         }
-        // Re-arm the matcher for the (possibly new) item under the new tolerance.
-        self.matcher = Matcher::new(&self.item, self.cents_window, self.sustain_ms);
+        // Re-arm the matcher for the (possibly new) item under the new tolerance/mode.
+        self.matcher = Matcher::new(
+            &self.item,
+            self.cents_window,
+            self.sustain_ms,
+            self.octave_strict,
+        );
     }
 
     /// The current settings as a serializable config (for persisting / comparing).
@@ -250,6 +267,7 @@ impl State {
             timbre_idx: self.timbre.index(),
             cents_window: self.cents_window,
             sustain_ms: self.sustain_ms as u64,
+            octave_strict: self.octave_strict,
         }
     }
 
@@ -371,6 +389,12 @@ impl overlay::OverlayApp for State {
                 self.persist();
                 self.reset();
             }
+            Message::SetOctaveStrict(on) => {
+                self.octave_strict = on;
+                self.persist();
+                // Re-arm on the current target (no need to pick a new item).
+                self.matcher = Matcher::new(&self.item, self.cents_window, self.sustain_ms, on);
+            }
             Message::Replay if self.enabled => {
                 let present = self.tone.play(
                     &freqs_of(&self.item),
@@ -421,7 +445,13 @@ impl overlay::OverlayApp for State {
             } else {
                 Color::from_rgba(1.0, 1.0, 1.0, 0.45)
             };
-            chips = chips.push(text(exercise::note_label(m)).size(34.0).color(color));
+            // In octave-strict mode the octave matters, so show it on the chip.
+            let label = if self.octave_strict {
+                exercise::note_label_oct(m)
+            } else {
+                exercise::note_label(m)
+            };
+            chips = chips.push(text(label).size(34.0).color(color));
         }
         let prompt = if flashing {
             "Acertou!"
@@ -514,6 +544,7 @@ fn event_stream() -> BoxStream<'static, Message> {
             timbre: Timbre::from_idx(cfg.timbre_idx),
             cents_window: cfg.cents_window,
             sustain_ms: cfg.sustain_ms as f64,
+            octave_strict: cfg.octave_strict,
         })
         .spawn();
     }

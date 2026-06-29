@@ -204,10 +204,20 @@ const SOLFEGE: [&str; 12] = [
 ];
 
 /// Display label for a MIDI note: solfège + letter, e.g. `note_label(60)` → "Dó (C)".
-/// Octave is intentionally omitted (matching is octave-folded).
+/// Octave is omitted (used where matching is octave-folded).
 pub fn note_label(midi: i64) -> String {
     let (letter, _octave) = pitch::midi_name(midi);
     format!("{} ({})", SOLFEGE[midi.rem_euclid(12) as usize], letter)
+}
+
+/// Like [`note_label`] but with the octave, e.g. `note_label_oct(60)` → "Dó (C4)".
+/// Used in octave-strict mode, where which octave to sing matters.
+pub fn note_label_oct(midi: i64) -> String {
+    let (letter, octave) = pitch::midi_name(midi);
+    format!(
+        "{} ({letter}{octave})",
+        SOLFEGE[midi.rem_euclid(12) as usize]
+    )
 }
 
 /// How fast the hold decays while out of the window, relative to how fast it
@@ -216,10 +226,13 @@ pub fn note_label(midi: i64) -> String {
 const OUT_DECAY: f64 = 2.0;
 
 /// Tracks how long each still-uncollected target has been sung in-tune and reports
-/// targets as "collected" once held for the sustain time. Matching is octave-folded:
-/// only the pitch class matters.
+/// targets as "collected" once held for the sustain time. When `strict` is false,
+/// matching is octave-folded (only the pitch class matters); when true, the sung
+/// pitch must be in the *exact* octave of the target.
 pub struct Matcher {
-    classes: Vec<i64>,
+    /// Absolute target MIDI notes (used directly in strict mode; folded otherwise).
+    targets: Vec<i64>,
+    strict: bool,
     held_ms: Vec<f64>,
     collected: Vec<bool>,
     cents_window: f64,
@@ -227,15 +240,25 @@ pub struct Matcher {
 }
 
 impl Matcher {
-    pub fn new(item: &[i64], cents_window: f64, sustain_ms: f64) -> Self {
-        let classes: Vec<i64> = item.iter().map(|m| m.rem_euclid(12)).collect();
-        let len = classes.len();
+    pub fn new(item: &[i64], cents_window: f64, sustain_ms: f64, strict: bool) -> Self {
+        let len = item.len();
         Matcher {
-            classes,
+            targets: item.to_vec(),
+            strict,
             held_ms: vec![0.0; len],
             collected: vec![false; len],
             cents_window,
             sustain_ms,
+        }
+    }
+
+    /// Signed cents from `sung` to target `i`: to the exact note (strict) or to the
+    /// nearest octave of its pitch class (folded).
+    fn cents_to(&self, sung: f64, i: usize) -> f64 {
+        if self.strict {
+            (sung - self.targets[i] as f64) * 100.0
+        } else {
+            cents_from_class(sung, self.targets[i].rem_euclid(12))
         }
     }
 
@@ -251,12 +274,12 @@ impl Matcher {
     /// zero and never collects — so this forgives flutter without false positives.
     pub fn update(&mut self, sung: Option<f64>, dt_ms: f64) -> Vec<usize> {
         let mut newly = Vec::new();
-        for i in 0..self.classes.len() {
+        for i in 0..self.targets.len() {
             if self.collected[i] {
                 continue;
             }
             let in_window = sung
-                .map(|p| cents_from_class(p, self.classes[i]).abs() <= self.cents_window)
+                .map(|p| self.cents_to(p, i).abs() <= self.cents_window)
                 .unwrap_or(false);
             if in_window {
                 self.held_ms[i] = (self.held_ms[i] + dt_ms).min(self.sustain_ms);
@@ -309,7 +332,7 @@ mod tests {
         let dt_ms = 33.0; // matcher tick cadence
         let base = pitch::note_to_frequency(sing_midi as f64 + offset_cents / 100.0, pitch::A4);
         let mut sm = pitch::Smoother::default();
-        let mut m = Matcher::new(&[target_midi], cents_window, sustain_ms);
+        let mut m = Matcher::new(&[target_midi], cents_window, sustain_ms, false);
         let frames = (secs * 1000.0 / dt_ms) as usize;
         for i in 0..frames {
             let t = i as f64 * dt_ms / 1000.0;
@@ -504,7 +527,7 @@ mod tests {
 
     #[test]
     fn collects_after_sustain() {
-        let mut m = Matcher::new(&[60], 50.0, 500.0);
+        let mut m = Matcher::new(&[60], 50.0, 500.0, false);
         for _ in 0..4 {
             assert!(m.update(Some(60.0), 100.0).is_empty());
         }
@@ -518,7 +541,7 @@ mod tests {
     fn brief_excursion_decays_but_does_not_reset() {
         // Held 300ms, then a short 50ms dip out of window: with OUT_DECAY=2 the
         // hold drops by 100ms (to 200ms), not to zero — progress is preserved.
-        let mut m = Matcher::new(&[60], 50.0, 500.0);
+        let mut m = Matcher::new(&[60], 50.0, 500.0, false);
         m.update(Some(60.0), 300.0);
         m.update(Some(63.0), 50.0); // out → 300 - 50*2 = 200
         // Only ~300ms more in-window is needed (not a fresh 500ms): 200→…→500.
@@ -532,7 +555,7 @@ mod tests {
     fn mostly_off_pitch_never_collects() {
         // False-positive guard: alternating in/out where out dominates can never
         // reach sustain — the 2× decay outpaces the accumulation.
-        let mut m = Matcher::new(&[60], 50.0, 500.0);
+        let mut m = Matcher::new(&[60], 50.0, 500.0, false);
         for _ in 0..60 {
             m.update(Some(60.0), 50.0); // +50 in
             m.update(Some(63.0), 50.0); // -100 out → net -50 per pair
@@ -542,7 +565,7 @@ mod tests {
 
     #[test]
     fn sustained_silence_decays_to_zero() {
-        let mut m = Matcher::new(&[60], 50.0, 500.0);
+        let mut m = Matcher::new(&[60], 50.0, 500.0, false);
         m.update(Some(60.0), 300.0);
         // Enough silence to fully decay (300 / (100*2) → ~2 frames), then it must
         // take a full hold again, never collecting on silence alone.
@@ -554,14 +577,35 @@ mod tests {
 
     #[test]
     fn matching_is_octave_folded() {
-        let mut m = Matcher::new(&[60], 50.0, 500.0); // target C
+        let mut m = Matcher::new(&[60], 50.0, 500.0, false); // target C
         // Singing C an octave up (72) still matches the pitch class.
         assert_eq!(m.update(Some(72.0), 500.0), vec![0]);
     }
 
     #[test]
+    fn strict_mode_requires_exact_octave() {
+        // Target C4 (60), strict: singing C5 (72) is the right class but wrong
+        // octave → must NOT collect.
+        let mut m = Matcher::new(&[60], 50.0, 500.0, true);
+        for _ in 0..10 {
+            assert!(m.update(Some(72.0), 100.0).is_empty());
+        }
+        assert!(!m.all_collected());
+        // Singing the exact octave (C4) collects.
+        let mut m = Matcher::new(&[60], 50.0, 500.0, true);
+        assert_eq!(m.update(Some(60.0), 500.0), vec![0]);
+    }
+
+    #[test]
+    fn note_label_oct_includes_octave() {
+        assert_eq!(note_label_oct(60), "Dó (C4)");
+        assert_eq!(note_label_oct(69), "Lá (A4)");
+        assert_eq!(note_label_oct(48), "Dó (C3)");
+    }
+
+    #[test]
     fn chord_collects_each_target_independently() {
-        let mut m = Matcher::new(&[60, 64, 67], 50.0, 100.0); // C E G
+        let mut m = Matcher::new(&[60, 64, 67], 50.0, 100.0, false); // C E G
         assert_eq!(m.update(Some(64.0), 100.0), vec![1]); // sing E
         assert_eq!(m.update(Some(60.0), 100.0), vec![0]); // sing C
         assert!(!m.all_collected());

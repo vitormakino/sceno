@@ -215,3 +215,30 @@ fn detects_voice_with_light_noise() {
         fails.join("\n")
     );
 }
+
+#[test]
+fn detects_the_exact_octave() {
+    // pYIN + fmin/fmax give the *absolute* pitch, so the octave is reliable — not
+    // just the pitch class. This guards that property (≥95% exact across A2..C5),
+    // so octave-aware features can trust it.
+    let mut total = 0;
+    let mut exact = 0;
+    for noise in [0.0f32, 0.05, 0.15] {
+        for &sr in &[44_100u32, 48_000] {
+            for midi in 45..=72 {
+                total += 1;
+                let buf = voice(midi as f64, sr, WINDOW, 0.0, noise);
+                if let Some(f) = detect_frequency(&buf, sr, MIN_CLARITY)
+                    && frequency_to_note(f, A4).midi as i64 == midi
+                {
+                    exact += 1;
+                }
+            }
+        }
+    }
+    let rate = 100.0 * exact as f64 / total as f64;
+    assert!(
+        rate >= 95.0,
+        "exact-octave rate {rate:.0}% ({exact}/{total})"
+    );
+}

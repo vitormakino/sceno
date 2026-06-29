@@ -78,11 +78,18 @@ system. Four shared library crates + five app binaries:
   (tray **Reprodução**) plays a chord either **Junto** (one block segment, default) or **Arpejo**
   (one segment per note).
   A tall fixed panel (`surface_height()=160`, `stacks()=false`) shows the target as
-  solfège+letter chips (`Dó (C)`) that turn green as each note is collected; the matcher is
-  gated off while the tone sounds so mic bleed can't auto-pass. A 33 ms gated tick drives
+  solfège+letter chips (`Dó (C)`, or `Dó (C4)` with the octave in strict mode) that turn green as
+  each note is collected; the matcher is gated off while the tone sounds so mic bleed can't
+  auto-pass. The `Matcher` accumulates in-window time (capped at sustain) and **decays** the hold
+  at 2× when the pitch leaves the window (rather than zeroing), so a brief onset wobble / vibrato
+  swing is forgiven while a pitch that's out-of-window >~1/3 of the time still can't collect (no
+  false positives). **Octave matching** is selectable (tray **Oitava exata**, `octave_strict`,
+  default *on*): strict requires the exact octave; off folds to pitch class (so any octave passes,
+  for voices whose range differs from the reference). A 33 ms gated tick drives
   sustain timing + the success flash. `VocalizeConfig { enabled, audible, scale_root,
-  scale_kind_idx, mode_idx, play_style_idx, timbre_idx, cents_window, sustain_ms }` persists the tray
-  choices (Tonalidade, Escala, Modo, Reprodução, Timbre, Tolerância, Sustentação, Som, Repetir tom).
+  scale_kind_idx, mode_idx, play_style_idx, timbre_idx, cents_window, sustain_ms, octave_strict }`
+  persists the tray choices (Tonalidade, Escala, Modo, Reprodução, Timbre, Tolerância, Sustentação,
+  Oitava exata, Som, Repetir tom).
   **Per-note practice stats** (`stats.rs`): each time a target is collected, the time from the
   item being armed (present phase ended) to collection is accumulated per pitch class, and the
   hardest class (highest avg, ≥3 samples) shows as a dim `⌛ mais difícil: …` line in the overlay.

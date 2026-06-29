@@ -18,6 +18,7 @@ pub struct VocalizeTray {
     pub timbre: Timbre,
     pub cents_window: f64,
     pub sustain_ms: f64,
+    pub octave_strict: bool,
 }
 
 impl ksni::Tray for VocalizeTray {
@@ -220,6 +221,18 @@ impl ksni::Tray for VocalizeTray {
             }
             .into(),
             MenuItem::Separator,
+            CheckmarkItem {
+                label: "Oitava exata".into(),
+                checked: self.octave_strict,
+                activate: Box::new(|this: &mut Self| {
+                    this.octave_strict = !this.octave_strict;
+                    let _ = this
+                        .tx
+                        .unbounded_send(Message::SetOctaveStrict(this.octave_strict));
+                }),
+                ..Default::default()
+            }
+            .into(),
             CheckmarkItem {
                 label: "Som".into(),
                 checked: self.audible,

@@ -30,6 +30,9 @@ pub struct VocalizeConfig {
     /// How long the pitch must be held in-window to count, in ms.
     #[serde(default = "default_sustain")]
     pub sustain_ms: u64,
+    /// Require the exact octave (vs. octave-folded pitch-class matching).
+    #[serde(default = "default_true")]
+    pub octave_strict: bool,
 }
 
 fn default_true() -> bool {
@@ -54,6 +57,7 @@ impl Default for VocalizeConfig {
             timbre_idx: 0,
             cents_window: 50.0,
             sustain_ms: 500,
+            octave_strict: true,
         }
     }
 }
@@ -74,10 +78,12 @@ mod tests {
             timbre_idx: 1,
             cents_window: 25.0,
             sustain_ms: 800,
+            octave_strict: false,
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let loaded: VocalizeConfig = serde_json::from_str(&json).unwrap();
         assert!(!loaded.enabled);
+        assert!(!loaded.octave_strict);
         assert!(!loaded.audible);
         assert_eq!(loaded.scale_root, 9);
         assert_eq!(loaded.scale_kind_idx, 1);
@@ -99,5 +105,6 @@ mod tests {
         assert_eq!(cfg.timbre_idx, 0);
         assert_eq!(cfg.cents_window, 50.0);
         assert_eq!(cfg.sustain_ms, 500);
+        assert!(cfg.octave_strict);
     }
 }
