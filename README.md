@@ -8,9 +8,10 @@ app — each app is its own small binary.
 ## Apps
 
 - **`lyrics`** — synced lyrics for whatever is playing. Reads now-playing from
-  any MPRIS player (browsers, Spotify, mpv, …) over D-Bus and fetches
-  time-synced lyrics from [LRCLIB](https://lrclib.net), anchored to the
-  player's reported position so lines stay in time.
+  any MPRIS player (browsers, Spotify, mpv, …) over D-Bus on Linux — or from
+  Apple Music / Spotify via AppleScript on macOS — and fetches time-synced
+  lyrics from [LRCLIB](https://lrclib.net), anchored to the player's reported
+  position so lines stay in time.
 - **`tuner`** — a vocal tuner. Captures the microphone, detects pitch (McLeod
   method), and shows the nearest note plus a tuning meter.
 - **`karaoke`** — UltraStar karaoke. Matches the playing track to a local `.txt`
@@ -49,6 +50,19 @@ cargo build --release
 
 The overlays are Wayland layer-shell surfaces and require a Wayland compositor
 that supports the `wlr-layer-shell` protocol (e.g. COSMIC, Sway, Hyprland).
+
+### macOS
+
+`tuner`, `vocalize`, and `lyrics` also run on macOS (as plain always-on-top
+windows; the system tray is Linux-only, so settings are read from
+`config.json`). `lyrics` reads now-playing from Apple Music or Spotify via
+AppleScript — the first run triggers a one-time Automation permission prompt.
+Build the portable subset with the bundled cargo aliases:
+
+```sh
+cargo mac          # build overlay, pitch, tuner, vocalize, media, lyrics
+./target/debug/lyrics
+```
 
 ## Configuration
 

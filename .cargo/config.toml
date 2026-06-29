@@ -1,11 +1,12 @@
 # Workspace aliases for the macOS-buildable subset.
 #
 # Cargo's `members`/`default-members` can't be cfg-gated per OS, so a bare
-# `cargo build` on macOS tries to compile the Linux-only crates (`lyrics`,
-# `karaoke`, `metronome` — they need MPRIS/dbus/wayland) and fails. These
-# aliases run only the portable subset (`overlay`, `pitch`, `tuner`,
-# `vocalize`), matching the CI `check-macos` job.
+# `cargo build` on macOS tries to compile the Linux-only crates (`karaoke`,
+# `metronome` — they need MPRIS/dbus/wayland) and fails. These aliases run
+# only the portable subset (`overlay`, `pitch`, `tuner`, `vocalize`, plus
+# `media` + `lyrics`, which gained an AppleScript now-playing backend),
+# matching the CI `check-macos` job.
 [alias]
-mac = "build -p overlay -p pitch -p tuner -p vocalize"
-mac-clippy = "clippy -p overlay -p pitch -p tuner -p vocalize --all-targets"
-mac-test = "test -p overlay -p pitch -p tuner -p vocalize"
+mac = "build -p overlay -p pitch -p tuner -p vocalize -p media -p lyrics"
+mac-clippy = "clippy -p overlay -p pitch -p tuner -p vocalize -p media -p lyrics --all-targets"
+mac-test = "test -p overlay -p pitch -p tuner -p vocalize -p media -p lyrics"

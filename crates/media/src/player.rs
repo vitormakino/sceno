@@ -1,13 +1,19 @@
-//! MPRIS (D-Bus) player tracking.
+//! Now-playing player tracking.
 //!
 //! Polls the active media player for now-playing metadata and position, fetches
 //! synced lyrics from LRCLIB on track changes, and delivers [`PlayerEvent`]s to a
 //! caller-supplied sink. Apps map these into their own message type.
+//!
+//! The *discovery* of the active player is platform-specific — **MPRIS** (D-Bus)
+//! on Linux, an **AppleScript** backend (Music.app / Spotify.app via `osascript`)
+//! elsewhere — but both feed the same shared [`Tracker`], so the track-change /
+//! fetch-retry / event-emission logic lives in one place.
 
 use crate::cue::CueEntry;
 use crate::lrclib::TrackQuery;
 use crate::sync::TimelineSync;
 use crate::{lrc, lrclib};
+#[cfg(target_os = "linux")]
 use mpris::{PlaybackStatus, PlayerFinder};
 use std::time::{Duration, Instant};
 
@@ -143,7 +149,9 @@ fn contains_noise(inner: &str) -> bool {
 }
 
 /// Whether an MPRIS player identity is a web browser (whose artist metadata is
-/// the channel/label, not the performer).
+/// the channel/label, not the performer). Linux-only: the AppleScript backend
+/// reads native players (Music/Spotify) whose tags are always trustworthy.
+#[cfg(target_os = "linux")]
 fn is_browser(identity: &str) -> bool {
     let id = identity.to_lowercase();
     [
@@ -204,8 +212,81 @@ fn debug(args: std::fmt::Arguments) {
     overlay::debug("player", args);
 }
 
+/// A platform-neutral now-playing reading: the resolved query plus a position
+/// sample. Both backends produce these; [`Tracker::step`] turns them into events.
+struct Snapshot {
+    query: Option<TrackQuery>,
+    sync: TimelineSync,
+}
+
+/// Shared track-change + fetch-retry state, driven by snapshots from whichever
+/// backend is active. Keeps the LRCLIB fetch logic in one place.
+struct Tracker {
+    current_key: Option<String>,
+    retries_left: u32,
+}
+
+impl Tracker {
+    fn new() -> Self {
+        Tracker {
+            current_key: None,
+            retries_left: 0,
+        }
+    }
+
+    /// Turn one snapshot into a [`PlayerEvent`] and hand it to `sink`. Fetches
+    /// lyrics on a new track, and re-attempts (one per call) when a track first
+    /// comes back empty. Returns `false` when the sink asks to stop.
+    fn step(&mut self, snap: Snapshot, sink: &mut impl FnMut(PlayerEvent) -> bool) -> bool {
+        let Snapshot { query, sync } = snap;
+        let key = query.as_ref().map(TrackQuery::key);
+        let track_changed = key != self.current_key;
+        if track_changed {
+            self.current_key = key;
+            self.retries_left = FETCH_RETRIES;
+        }
+
+        // Fetch on a new track, or while retrying one that came back empty.
+        let event = if track_changed || self.retries_left > 0 {
+            let cues = fetch_cues(&query);
+            if !cues.is_empty() {
+                self.retries_left = 0;
+                debug(format_args!("query={:?} -> {} cues", query, cues.len()));
+                PlayerEvent::Track { query, cues, sync }
+            } else if track_changed {
+                // First miss — keep the empty timeline but schedule retries.
+                debug(format_args!("query={:?} -> no lyrics (will retry)", query));
+                PlayerEvent::Track { query, cues, sync }
+            } else {
+                self.retries_left -= 1;
+                debug(format_args!(
+                    "retry: still no lyrics ({} left)",
+                    self.retries_left
+                ));
+                PlayerEvent::Sync(sync)
+            }
+        } else {
+            PlayerEvent::Sync(sync)
+        };
+
+        sink(event)
+    }
+}
+
+/// Fetch and parse synced lyrics for a query, or an empty list on miss/failure.
+fn fetch_cues(query: &Option<TrackQuery>) -> Vec<CueEntry> {
+    query
+        .as_ref()
+        .and_then(lrclib::fetch_synced)
+        .map(|s| lrc::parse_lrc(&s))
+        .unwrap_or_default()
+}
+
+// ── Linux backend: MPRIS (D-Bus) ────────────────────────────────────────────
+
 /// Run the MPRIS polling loop forever (intended to own a dedicated thread).
 /// `sink` returns `false` to stop (its receiver was dropped on app exit).
+#[cfg(target_os = "linux")]
 pub fn run(mut sink: impl FnMut(PlayerEvent) -> bool) {
     loop {
         match PlayerFinder::new() {
@@ -223,9 +304,9 @@ pub fn run(mut sink: impl FnMut(PlayerEvent) -> bool) {
 
 /// Follow the active player until it disappears or errors, then return `true` so
 /// the caller can re-discover. Returns `false` if the sink asked to stop.
+#[cfg(target_os = "linux")]
 fn track_active_player(finder: &PlayerFinder, sink: &mut impl FnMut(PlayerEvent) -> bool) -> bool {
-    let mut current_key: Option<String> = None;
-    let mut retries_left: u32 = 0;
+    let mut tracker = Tracker::new();
 
     loop {
         let player = match finder.find_active() {
@@ -272,39 +353,7 @@ fn track_active_player(finder: &PlayerFinder, sink: &mut impl FnMut(PlayerEvent)
             playback_rate: if rate > 0.0 { rate } else { 1.0 },
         };
 
-        let key = query.as_ref().map(TrackQuery::key);
-        let track_changed = key != current_key;
-        if track_changed {
-            current_key = key;
-            retries_left = FETCH_RETRIES;
-        }
-
-        // Fetch on a new track, or while retrying one that came back empty.
-        let event = if track_changed || retries_left > 0 {
-            let cues = fetch_cues(&query);
-            if !cues.is_empty() {
-                retries_left = 0;
-                debug(format_args!(
-                    "player='{}' query={:?} -> {} cues",
-                    player.identity(),
-                    query,
-                    cues.len()
-                ));
-                PlayerEvent::Track { query, cues, sync }
-            } else if track_changed {
-                // First miss — keep the empty timeline but schedule retries.
-                debug(format_args!("query={:?} -> no lyrics (will retry)", query));
-                PlayerEvent::Track { query, cues, sync }
-            } else {
-                retries_left -= 1;
-                debug(format_args!("retry: still no lyrics ({retries_left} left)"));
-                PlayerEvent::Sync(sync)
-            }
-        } else {
-            PlayerEvent::Sync(sync)
-        };
-
-        if !sink(event) {
+        if !tracker.step(Snapshot { query, sync }, sink) {
             return false; // app shutting down
         }
 
@@ -312,13 +361,128 @@ fn track_active_player(finder: &PlayerFinder, sink: &mut impl FnMut(PlayerEvent)
     }
 }
 
-/// Fetch and parse synced lyrics for a query, or an empty list on miss/failure.
-fn fetch_cues(query: &Option<TrackQuery>) -> Vec<CueEntry> {
-    query
-        .as_ref()
-        .and_then(lrclib::fetch_synced)
-        .map(|s| lrc::parse_lrc(&s))
-        .unwrap_or_default()
+// ── macOS (and other non-Linux) backend: AppleScript ────────────────────────
+
+/// Run the AppleScript polling loop forever (intended to own a dedicated thread).
+/// Reads Music.app, then Spotify.app, whichever is running and not stopped.
+/// `sink` returns `false` to stop (its receiver was dropped on app exit).
+#[cfg(not(target_os = "linux"))]
+pub fn run(mut sink: impl FnMut(PlayerEvent) -> bool) {
+    let mut tracker = Tracker::new();
+    loop {
+        match poll_now_playing() {
+            Some(snap) => {
+                if !tracker.step(snap, &mut sink) {
+                    return; // app shutting down
+                }
+                std::thread::sleep(POLL_INTERVAL);
+            }
+            None => {
+                // Nothing playing (or no scriptable player) — back off and retry.
+                std::thread::sleep(IDLE_INTERVAL);
+            }
+        }
+    }
+}
+
+/// Player apps queried in priority order: native Music first, then Spotify.
+#[cfg(not(target_os = "linux"))]
+const SCRIPTABLE_PLAYERS: &[&str] = &["Music", "Spotify"];
+
+/// Ask each scriptable player for its current track; return the first hit.
+#[cfg(not(target_os = "linux"))]
+fn poll_now_playing() -> Option<Snapshot> {
+    SCRIPTABLE_PLAYERS
+        .iter()
+        .find_map(|app| parse_now_playing(&run_osascript(app), app))
+}
+
+/// Run the now-playing AppleScript for `app`, returning its trimmed stdout
+/// (empty on any error, or when the app isn't running / is stopped).
+#[cfg(not(target_os = "linux"))]
+fn run_osascript(app: &str) -> String {
+    match std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(now_playing_script(app))
+        .output()
+    {
+        Ok(out) => String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        Err(e) => {
+            // First call also surfaces a TCC Automation denial (osascript exits
+            // non-zero with empty stdout); treat any failure as "nothing playing".
+            debug(format_args!("osascript('{app}') failed: {e}"));
+            String::new()
+        }
+    }
+}
+
+/// Build the guarded AppleScript that returns a pipe-delimited now-playing line,
+/// or an empty string. The `is running` guard avoids auto-launching the app.
+#[cfg(not(target_os = "linux"))]
+fn now_playing_script(app: &str) -> String {
+    format!(
+        "if application \"{app}\" is running then\n\
+         tell application \"{app}\"\n\
+         if player state is not stopped then\n\
+         set t to current track\n\
+         return (name of t) & \"|\" & (artist of t) & \"|\" & (album of t) & \"|\" & (duration of t) & \"|\" & (player position) & \"|\" & (player state as text)\n\
+         end if\n\
+         end tell\n\
+         end if\n\
+         return \"\""
+    )
+}
+
+/// Parse one pipe-delimited now-playing line (`name|artist|album|duration|position|state`)
+/// into a [`Snapshot`]. Returns `None` for empty/short output. Spotify reports
+/// `duration` in milliseconds (Music in seconds), so the unit is normalized by app.
+#[cfg(not(target_os = "linux"))]
+fn parse_now_playing(stdout: &str, app: &str) -> Option<Snapshot> {
+    let line = stdout.trim();
+    if line.is_empty() {
+        return None;
+    }
+    let f: Vec<&str> = line.split('|').collect();
+    if f.len() < 6 {
+        debug(format_args!("unparsable now-playing line: {line:?}"));
+        return None;
+    }
+    let title = f[0].trim().to_string();
+    let artist = f[1].trim().to_string();
+    let album = f[2].trim().to_string();
+    // AppleScript formats reals per the system locale, so a pt-BR/EU Mac yields a
+    // decimal comma ("199,80"). Normalize to a dot before parsing.
+    let duration_raw: f64 = f[3].trim().replace(',', ".").parse().ok()?;
+    let position: f64 = f[4].trim().replace(',', ".").parse().unwrap_or(0.0);
+    let state = f[5].trim();
+
+    // Spotify's `duration` is in ms; Music's is in seconds.
+    let length_secs = if app.eq_ignore_ascii_case("Spotify") {
+        (duration_raw / 1000.0) as u64
+    } else {
+        duration_raw as u64
+    };
+
+    let query = build_query(
+        Some(title),
+        if artist.is_empty() {
+            Vec::new()
+        } else {
+            vec![artist]
+        },
+        Some(album),
+        Some(length_secs),
+        false, // native player: trustworthy tags, keep title intact
+    );
+
+    let paused = !state.eq_ignore_ascii_case("playing");
+    let sync = TimelineSync {
+        video_time: position,
+        captured_at: Instant::now(),
+        paused,
+        playback_rate: 1.0,
+    };
+    Some(Snapshot { query, sync })
 }
 
 #[cfg(test)]
@@ -479,6 +643,7 @@ mod tests {
         assert_eq!(q.title, "Numb - Remastered");
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn is_browser_detects_common_browsers() {
         for id in ["Chrome", "Chromium", "Mozilla Firefox", "Brave"] {
@@ -493,5 +658,94 @@ mod tests {
     fn fetch_cues_empty_for_missing_query() {
         // A `None` query short-circuits before any network access.
         assert!(fetch_cues(&None).is_empty());
+    }
+}
+
+// ── macOS AppleScript parsing ───────────────────────────────────────────────
+// The subprocess can't run in CI, but the line parser is pure and testable; the
+// macOS CI job (`check-macos`) compiles + runs these.
+#[cfg(all(test, not(target_os = "linux")))]
+mod macos_tests {
+    use super::*;
+
+    #[test]
+    fn parses_music_line_seconds() {
+        let snap = parse_now_playing(
+            "Get Lucky|Daft Punk|Random Access Memories|248|12.5|playing",
+            "Music",
+        )
+        .expect("should parse");
+        let q = snap.query.expect("query");
+        assert_eq!(q.artist, "Daft Punk");
+        assert_eq!(q.title, "Get Lucky");
+        assert_eq!(q.album.as_deref(), Some("Random Access Memories"));
+        assert_eq!(q.duration, Some(248)); // Music: seconds, used as-is
+        assert!(!snap.sync.paused);
+        assert_eq!(snap.sync.video_time, 12.5);
+    }
+
+    #[test]
+    fn spotify_duration_is_milliseconds() {
+        // Spotify reports duration in ms; 248000 ms → 248 s.
+        let snap = parse_now_playing("Get Lucky|Daft Punk|RAM|248000|0.0|playing", "Spotify")
+            .expect("should parse");
+        assert_eq!(snap.query.unwrap().duration, Some(248));
+    }
+
+    #[test]
+    fn parses_comma_decimal_locale() {
+        // A pt-BR/EU Mac formats AppleScript reals with a decimal comma.
+        let snap = parse_now_playing(
+            "Last Resort|Papa Roach|Infest|199,807|59,632|playing",
+            "Music",
+        )
+        .expect("should parse comma decimals");
+        assert_eq!(snap.query.unwrap().duration, Some(199));
+        assert!((snap.sync.video_time - 59.632).abs() < 1e-6);
+    }
+
+    #[test]
+    fn paused_state_sets_paused() {
+        let snap = parse_now_playing("Song|Artist|Album|100|3.0|paused", "Music").unwrap();
+        assert!(snap.sync.paused);
+    }
+
+    #[test]
+    fn empty_output_is_none() {
+        // The guarded script returns "" when nothing is playing / app is closed.
+        assert!(parse_now_playing("", "Music").is_none());
+        assert!(parse_now_playing("   \n", "Spotify").is_none());
+    }
+
+    #[test]
+    fn short_line_is_none() {
+        assert!(parse_now_playing("Song|Artist", "Music").is_none());
+    }
+
+    #[test]
+    fn title_with_spaces_preserved() {
+        let snap = parse_now_playing(
+            "Some Long Title|The Artist|An Album|200|1.0|playing",
+            "Music",
+        )
+        .unwrap();
+        assert_eq!(snap.query.unwrap().title, "Some Long Title");
+    }
+
+    #[test]
+    fn missing_artist_falls_through_to_title() {
+        // Empty artist field → build_query tries to split "Artist - Title" from
+        // the title; with no separator it keeps the title and a blank artist.
+        let snap = parse_now_playing("Untitled||Album|10|0.0|playing", "Music").unwrap();
+        let q = snap.query.unwrap();
+        assert_eq!(q.artist, "");
+        assert_eq!(q.title, "Untitled");
+    }
+
+    #[test]
+    fn script_is_guarded_against_autolaunch() {
+        let s = now_playing_script("Music");
+        assert!(s.contains("is running"));
+        assert!(s.contains("player state is not stopped"));
     }
 }

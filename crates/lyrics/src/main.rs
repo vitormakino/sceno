@@ -1,8 +1,11 @@
+// The macOS build compiles without the tray; the menu helpers it would use are
+// then unused. Silence dead-code there rather than cfg-gate each one.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
+
 use futures::channel::mpsc;
 use futures::stream::BoxStream;
 use iced::widget::{column, container, row, text};
 use iced::{Color, Element, Subscription, Task};
-use iced_layershell::to_layer_message;
 use media::player::{self, PlayerEvent};
 use media::{CueEntry, TimelineSync, TrackQuery, cue_at, lines_at};
 use overlay::FontSize;
@@ -29,7 +32,7 @@ const LOOKAHEAD: Color = Color::from_rgba(1.0, 1.0, 1.0, 0.5);
 
 // ── App types ─────────────────────────────────────────────────────────────────
 
-#[to_layer_message]
+#[cfg_attr(target_os = "linux", iced_layershell::to_layer_message)]
 #[derive(Debug, Clone)]
 enum Message {
     SetEnabled(bool),
@@ -43,6 +46,9 @@ enum Message {
     /// Toggle the dimmed lookahead (next) line.
     SetShowNext(bool),
     TimelineTick,
+    /// The on-disk config changed (external edit); reload if it actually differs.
+    /// The only config surface on macOS, where there is no tray.
+    ReloadConfig,
     /// Rewrite the config with defaults and rebuild from it (tray "Restaurar padrões").
     ResetDefaults,
 }
@@ -116,17 +122,19 @@ impl State {
         }
     }
 
+    /// The current settings as a serializable config (for persisting / comparing).
+    fn current_config(&self) -> SavedConfig {
+        SavedConfig {
+            font_size_idx: self.font_size.index(),
+            enabled: self.enabled,
+            offsets: self.offsets.clone(),
+            show_next: self.show_next,
+        }
+    }
+
     /// Persist font size, enabled, the per-song offset map, and lookahead toggle.
     fn persist(&self) {
-        overlay::save(
-            APP,
-            &SavedConfig {
-                font_size_idx: self.font_size.index(),
-                enabled: self.enabled,
-                offsets: self.offsets.clone(),
-                show_next: self.show_next,
-            },
-        );
+        overlay::save(APP, &self.current_config());
     }
 }
 
@@ -154,8 +162,9 @@ fn apply_timeline_caption(state: &mut State) {
     }
 }
 
-// ── System tray ───────────────────────────────────────────────────────────────
+// ── System tray (Linux only) ────────────────────────────────────────────────
 
+#[cfg(target_os = "linux")]
 struct LyricsTray {
     tx: mpsc::UnboundedSender<Message>,
     enabled: bool,
@@ -163,12 +172,14 @@ struct LyricsTray {
     show_next: bool,
 }
 
+#[cfg(target_os = "linux")]
 impl LyricsTray {
     fn nudge(&self, delta: f64) {
         let _ = self.tx.unbounded_send(Message::NudgeOffset(delta));
     }
 }
 
+#[cfg(target_os = "linux")]
 impl ksni::Tray for LyricsTray {
     fn icon_name(&self) -> String {
         "audio-x-generic".into()
@@ -291,6 +302,7 @@ impl overlay::OverlayApp for State {
         APP
     }
 
+    #[cfg(target_os = "linux")]
     fn margin_changed(margin: (i32, i32, i32, i32)) -> Self::Message {
         Message::MarginChange(margin)
     }
@@ -305,17 +317,18 @@ impl overlay::OverlayApp for State {
 
     fn subscription(&self) -> Subscription<Self::Message> {
         let events = Subscription::run(event_stream);
+        let watch = Subscription::run(config_watch_stream);
         // Only tick when playing — paused playback needs no interpolation.
         let needs_tick = self.enabled && !self.cues.is_empty() && !self.paused;
         if needs_tick {
-            Subscription::batch([events, Subscription::run(timeline_tick_stream)])
+            Subscription::batch([events, watch, Subscription::run(timeline_tick_stream)])
         } else {
-            events
+            Subscription::batch([events, watch])
         }
     }
 }
 
-fn main() -> iced_layershell::Result {
+fn main() -> overlay::Result {
     overlay::run::<State>()
 }
 
@@ -377,6 +390,16 @@ fn update(state: &mut State, msg: Message) -> Task<Message> {
         }
         Message::TimelineTick if state.enabled => {
             apply_timeline_caption(state);
+        }
+        Message::ReloadConfig => {
+            // A watcher fires on every mtime bump, including our own persists.
+            // Ignore a missing/malformed edit (don't reset to defaults), and
+            // only apply when the file's settings actually differ from ours.
+            if let Some(on_disk) = overlay::load_config_checked::<SavedConfig>(APP)
+                && on_disk != state.current_config()
+            {
+                state.apply_config(on_disk);
+            }
         }
         Message::ResetDefaults => {
             state.apply_config(overlay::reset_defaults(APP));
@@ -469,15 +492,21 @@ fn view(state: &State) -> Element<'_, Message> {
 
 fn event_stream() -> BoxStream<'static, Message> {
     let (tx, rx) = mpsc::unbounded::<Message>();
-    let cfg: SavedConfig = overlay::load_config(APP);
 
-    ksni::TrayService::new(LyricsTray {
-        tx: tx.clone(),
-        enabled: cfg.enabled,
-        font_size: FontSize::from_idx(cfg.font_size_idx),
-        show_next: cfg.show_next,
-    })
-    .spawn();
+    // The tray is Linux-only (ksni / StatusNotifierItem over D-Bus). Off Linux
+    // the overlay runs from the persisted config + the live config-watch, with
+    // no menu — see CLAUDE.md.
+    #[cfg(target_os = "linux")]
+    {
+        let cfg: SavedConfig = overlay::load_config(APP);
+        ksni::TrayService::new(LyricsTray {
+            tx: tx.clone(),
+            enabled: cfg.enabled,
+            font_size: FontSize::from_idx(cfg.font_size_idx),
+            show_next: cfg.show_next,
+        })
+        .spawn();
+    }
 
     std::thread::spawn(move || {
         player::run(|ev| match ev {
@@ -489,6 +518,12 @@ fn event_stream() -> BoxStream<'static, Message> {
     });
 
     Box::pin(rx)
+}
+
+/// Emits `ReloadConfig` when the on-disk config changes — makes external edits
+/// to `config.json` apply live (the only config surface on macOS, no tray).
+fn config_watch_stream() -> BoxStream<'static, Message> {
+    overlay::watch_config_stream(APP, || Message::ReloadConfig)
 }
 
 fn timeline_tick_stream() -> BoxStream<'static, Message> {

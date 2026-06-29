@@ -35,11 +35,11 @@ jobs:
         run: cargo test --workspace
 
   # macOS compiles the portable subset only: the shared overlay shell (plain-iced
-  # window backend) plus the two apps that need no MPRIS now-playing. `lyrics`,
-  # `karaoke` and `metronome` stay Linux-only until the media source is ported.
-  # This job proves the non-Linux code paths build; runtime behavior (window,
-  # mic) is validated manually on a Mac. No apt step — CoreAudio/Cocoa ship with
-  # the runner.
+  # window backend), the mic apps (`tuner`/`vocalize`), and `lyrics` + `media`
+  # (now-playing via the AppleScript backend). `karaoke`/`metronome` stay
+  # Linux-only until their libs are ported. This job proves the non-Linux code
+  # paths build; runtime behavior (window, mic, osascript) is validated manually
+  # on a Mac. No apt step — CoreAudio/Cocoa ship with the runner.
   check-macos:
     runs-on: macos-latest
     steps:
@@ -52,10 +52,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Clippy
-        run: cargo clippy -p overlay -p pitch -p tuner -p vocalize --all-targets -- -D warnings
+        run: cargo clippy -p overlay -p pitch -p tuner -p vocalize -p media -p lyrics --all-targets -- -D warnings
 
       - name: Build
-        run: cargo build -p overlay -p pitch -p tuner -p vocalize
+        run: cargo build -p overlay -p pitch -p tuner -p vocalize -p media -p lyrics
 
       - name: Test
-        run: cargo test -p overlay -p pitch -p tuner -p vocalize
+        run: cargo test -p overlay -p pitch -p tuner -p vocalize -p media -p lyrics

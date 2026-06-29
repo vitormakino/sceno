@@ -11,8 +11,12 @@ repository.workspace = true
 overlay = { path = "../overlay" }
 media = { path = "../media" }
 iced.workspace = true
-iced_layershell.workspace = true
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+# The layer-shell window backend and the ksni tray are Linux-only; off Linux the
+# overlay runs as a plain iced window with no tray (see `overlay::run`).
+[target.'cfg(target_os = "linux")'.dependencies]
+iced_layershell.workspace = true
 ksni.workspace = true

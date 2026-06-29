@@ -11,5 +11,9 @@ repository.workspace = true
 overlay = { path = "../overlay" }
 serde.workspace = true
 serde_json.workspace = true
-mpris.workspace = true
 ureq.workspace = true
+
+# Now-playing source is platform-specific: MPRIS (D-Bus) on Linux, an
+# AppleScript backend (no extra deps, just `osascript`) elsewhere.
+[target.'cfg(target_os = "linux")'.dependencies]
+mpris.workspace = true

@@ -92,7 +92,7 @@ Stack: `iced` 0.14 under `iced_layershell` 0.18 (wgpu), `ksni` tray, `serde`,
 
 ## Platforms
 
-Linux/Wayland is the primary target. `tuner` and `vocalize` also build on **macOS**:
+Linux/Wayland is the primary target. `tuner`, `vocalize`, and `lyrics` also build on **macOS**:
 `overlay::run` has two backends behind `#[cfg(target_os = "linux")]` — the layer-shell
 shell on Linux, a plain `iced` always-on-top transparent window (centered, pinned near the
 bottom via `window::Position::SpecificWith`) elsewhere. The layer-shell–only pieces are
@@ -115,11 +115,23 @@ and now-playing match, vocalize doesn't re-randomize or blare the tone, karaoke 
 library only if its directory changed, and `metronome` pushes the new tempo onto its
 process-global `SharedClock` (which `State` only holds a clone of). Reset writes the defaults
 via `overlay::reset_defaults::<Config>(app)` and feeds the result straight to `apply_config`.
-`lyrics`/`karaoke`/`metronome` stay Linux-only (they need the `mpris` now-playing source) and
-only get seed + reset, not the watcher (they always have a tray). CI verifies the macOS subset via the `check-macos` job
-(`overlay`, `pitch`, `tuner`, `vocalize`). When editing a `tuner`/`vocalize` `update` match,
-a `_ => {}` arm that becomes unreachable off Linux must be `#[cfg(target_os = "linux")]`-gated
-(unless a guarded arm keeps it reachable). See `docs/plans/2026-06-26-macos-compat.md`.
+`lyrics` also builds on macOS: `media::player::run` has the same `#[cfg(target_os = "linux")]`
+backend split as `overlay::run` — **MPRIS** (D-Bus) on Linux, an **AppleScript** backend
+elsewhere (`osascript` polling Music.app then Spotify.app, guarded by `is running` so it never
+auto-launches them; the pipe-delimited line is parsed by the pure, unit-tested `parse_now_playing`,
+which normalizes Spotify's ms duration to seconds). Both backends feed a shared `Tracker` that
+holds the track-change + LRCLIB fetch-retry logic, so only *player discovery* is platform-specific;
+lyrics still come from LRCLIB exactly as on Linux (Apple Music's own lyrics aren't exposed by any
+API). The `mpris` dep is Linux-gated in `crates/media/Cargo.toml`. Because macOS has no tray,
+`lyrics` got the same seed + **live watcher** as `tuner`/`vocalize` (revising the earlier "apps
+with a tray skip the watcher" call); the first `osascript` call triggers a one-time TCC Automation
+prompt (denial → treated as "no player", never a crash) — `.app`/Info.plist signing for
+distribution is a follow-up. `karaoke`/`metronome` stay Linux-only (their UI/libs aside, they'd
+reuse this same backend to cross over). CI verifies the macOS subset via the `check-macos` job
+(`overlay`, `pitch`, `tuner`, `vocalize`, `media`, `lyrics`). When editing a `tuner`/`vocalize`/`lyrics`
+`update` match, a `_ => {}` arm that becomes unreachable off Linux must be
+`#[cfg(target_os = "linux")]`-gated (unless a guarded arm keeps it reachable). See
+`docs/plans/2026-06-26-macos-compat.md` and `docs/plans/2026-06-29-lyrics-macos-nowplaying.md`.
 
 ## Tuner meter styles
 
@@ -181,12 +193,12 @@ later commits/tests; when splitting work across commits, the symbol becomes "use
 consumer lands — don't paper over it with `#[allow(dead_code)]`.
 
 **On macOS**, a bare `cargo build` fails: `members = ["crates/*"]` pulls the Linux-only
-crates (`lyrics`/`karaoke`/`metronome` need MPRIS/dbus/wayland), and `members`/`default-members`
+crates (`karaoke`/`metronome` need MPRIS/dbus/wayland), and `members`/`default-members`
 can't be cfg-gated per OS. Build the portable subset only — `.cargo/config.toml` provides
 aliases matching the CI `check-macos` job (append `-- -D warnings` to match its clippy):
 
 ```sh
-cargo mac          # build -p overlay -p pitch -p tuner -p vocalize
+cargo mac          # build -p overlay -p pitch -p tuner -p vocalize -p media -p lyrics
 cargo mac-clippy    # clippy … --all-targets
 cargo mac-test      # test …
 ```
