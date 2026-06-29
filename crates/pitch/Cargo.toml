@@ -9,5 +9,5 @@ repository.workspace = true
 
 [dependencies]
 overlay = { path = "../overlay" }
-pitch-detection = "0.3"
 cpal = "0.15"
+pyin = { version = "1.2.0", default-features = false }

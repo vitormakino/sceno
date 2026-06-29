@@ -283,6 +283,20 @@ impl overlay::OverlayApp for State {
             Message::PitchUpdate(freq) => {
                 self.sung_note = freq.map(|f| pitch::frequency_to_note(f, pitch::A4));
                 self.sung = self.sung_note.map(|n| n.midi + n.cents / 100.0);
+                // SCENO_DEBUG: target item vs. what was heard, to diagnose
+                // detection/device issues against a known input (e.g. a piano).
+                overlay::debug(
+                    "vocalize",
+                    format_args!(
+                        "target={:?} heard={} ({})",
+                        self.item,
+                        freq.map(|f| format!("{f:.1}Hz"))
+                            .unwrap_or_else(|| "—".into()),
+                        self.sung_note
+                            .map(|n| format!("{}{} {:+.0}c", n.name, n.octave, n.cents))
+                            .unwrap_or_else(|| "—".into()),
+                    ),
+                );
             }
             Message::Tick => {
                 let now = Instant::now();

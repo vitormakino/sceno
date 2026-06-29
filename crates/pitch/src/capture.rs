@@ -14,15 +14,13 @@ use crate::smooth::Smoother;
 
 /// Analysis window size (samples) — also the minimum buffer fill before detecting.
 pub const WINDOW: usize = 4096;
-/// McLeod clarity threshold (0..1) below which a frame is treated as no pitch.
-///
-/// Tuned for **voice in a real room**: a sung vowel picked up by a laptop mic
-/// with background noise often only reaches a clarity of ~0.4–0.5, so the old
-/// 0.6 gate silently rejected *every* frame at realistic SNRs (see
-/// `tests/detection.rs`), which read as "the mic isn't being heard". 0.4 still
-/// rejects pure noise (which sits well below it), so it doesn't false-detect a
-/// pitch from silence.
-pub const MIN_CLARITY: f64 = 0.4;
+/// Floor on pYIN's voicing *probability* (0..1), on top of pYIN's own
+/// voiced/unvoiced HMM decision (which is the real gate). pYIN reports a *low*
+/// probability for a clear-but-noisy voice even when it correctly marks the frame
+/// voiced, so a high floor would throw away good detections in a real room — hence
+/// 0.0 (trust pYIN's voiced flag). Raise it only if pure noise starts reading as a
+/// pitch (it doesn't — pYIN marks noise unvoiced). See `tests/detection.rs`.
+pub const MIN_CLARITY: f64 = 0.0;
 
 /// Open the default input device and run the capture/analysis loop, calling
 /// `sink` with each smoothed frequency (Hz). Blocks; intended to own a dedicated

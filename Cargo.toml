@@ -23,3 +23,17 @@ libc = "0.2"
 dbus = "0.9"
 mpris = "2"
 ureq = "2"
+
+# Optimize *dependencies* even in debug builds. pYIN (FFT + HMM, in `pitch`) is
+# far too slow unoptimized — a `target/debug` run would lag the 50 ms capture
+# loop badly. This keeps our own crates unoptimized (debuggable) while the DSP
+# deps run at full speed, so `cargo run`/`target/debug` binaries are usable.
+[profile.dev.package."*"]
+opt-level = 3
+
+# `pitch` itself must be optimized too: pYIN is generic, so its hot inner loops
+# are *monomorphized into `pitch`*, not pyin's rlib. Without this, a debug build
+# of `pitch` (or a direct `cargo test -p pitch`) runs pYIN unoptimized (~450 ms a
+# frame). The crate is pure DSP/math, so opt-3 doesn't hurt debuggability.
+[profile.dev.package.pitch]
+opt-level = 3

@@ -20,7 +20,9 @@ system. Four shared library crates + five app binaries:
   (`overlay::debug(tag, args)`).
 - **`pitch`** (lib) — mic capture + pitch math: `note` (`frequency_to_note`,
   `note_to_frequency`, `is_in_tune`, `Note` with a `midi` field), `smooth` (`Smoother`),
-  `detect_frequency` (McLeod/MPM), `capture::run_capture` (cpal stream + 50 ms loop, calls a
+  `detect_frequency` (**pYIN**, `pyin` crate — searches only `MIN_HZ..=MAX_HZ` ≈ 70–1000 Hz and
+  gates on pYIN's own voiced flag, so sub-bass rumble / upper-partial locks can't be mistaken for
+  the note — a real-mic failure of the old McLeod detector), `capture::run_capture` (cpal stream + 50 ms loop, calls a
   `sink(Option<Note>) -> bool` that returns `false` to stop), and `cents_color` (→ `[f32;3]`).
   Used by `tuner`, `karaoke`, and `vocalize`.
 - **`media`** (lib) — now-playing + lyrics sources: `player` (MPRIS loop delivering a neutral
@@ -95,7 +97,7 @@ human-named file is both the re-download guard and a browsable copy (there is no
 cache under `~/.cache`).
 
 Stack: `iced` 0.14 under `iced_layershell` 0.18 (wgpu), `ksni` tray, `serde`,
-`pitch-detection` (McLeod/MPM), `cpal`, `mpris`, `ureq`. `#[to_layer_message]` injects extra
+`pyin` (probabilistic YIN, pure Rust), `cpal`, `mpris`, `ureq`. `#[to_layer_message]` injects extra
 `Message` variants, so `update` match blocks need a `_ => {}` arm.
 
 ## Platforms
@@ -182,13 +184,19 @@ Style/on-off/reference/instrument are persisted as
   `~/.cache/sceno/<app>/`. Each app owns its config struct; `overlay::{load_config, save}`
   are generic over any serde type.
 - **Tracing:** `SCENO_DEBUG=1` enables stderr traces via `overlay::debug("<tag>", args)`.
-- **Pitch detection** stays on `pitch-detection` (pure Rust, no C deps). pYIN/microdsp are
-  documented future options in the spec, not adopted. `pitch::MIN_CLARITY` is **0.4**, tuned for
-  voice in a real (noisy) room — the McLeod clarity of a sung vowel over a laptop mic often only
-  reaches ~0.4–0.5, so a higher gate silently drops every frame ("mic not heard"). The synthetic
-  voice integration test `crates/pitch/tests/detection.rs` (harmonics + vibrato + noise, swept
-  across the range at both sample rates) is the place to re-validate any change to the detector or
-  this threshold; it's the regression guard for "the mic isn't picking me up".
+- **Pitch detection** uses **pYIN** (`pyin` crate, pure Rust — replaced `pitch-detection`'s
+  McLeod, which on a sensitive condenser mic locked onto sub-bass rumble / upper partials instead
+  of the note). pYIN takes `fmin`/`fmax` (`pitch::{MIN_HZ, MAX_HZ}` ≈ 70–1000 Hz) so out-of-range
+  energy can't win, and reports a per-frame voiced flag + probability; `detect_frequency` returns
+  the median f0 over voiced frames. `MIN_CLARITY` is a floor on pYIN's voicing *probability* and is
+  **0.0** (trust pYIN's voiced flag — its probability runs low for clear-but-noisy voice, so a
+  higher floor would drop good detections). pYIN reuses a thread-local executor (building one per
+  frame is too slow). **pYIN is generic, so its hot code monomorphizes into `pitch`** — the root
+  `[profile.dev.package.pitch] opt-level = 3` (and `package."*"`) keeps debug builds usable (~24 ms
+  vs ~450 ms a frame); a release build is ~2 ms. The integration test
+  `crates/pitch/tests/detection.rs` (voice-like sweeps + a rumble/upper-partial regression + a
+  pure-noise rejection) validates any detector change; it's the guard for both "mic not heard" and
+  "detects the wrong note".
 
 ## Verifying changes
 
