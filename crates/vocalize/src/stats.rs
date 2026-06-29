@@ -55,7 +55,10 @@ impl Stats {
         (0..12)
             .filter_map(|c| {
                 let e = self.by_class.get(c)?;
-                (e.count >= MIN_SAMPLES).then(|| (c, e.total_ms / e.count as f64))
+                if e.count < MIN_SAMPLES {
+                    return None;
+                }
+                Some((c, self.avg_ms(c)?))
             })
             .max_by(|a, b| a.1.total_cmp(&b.1))
     }
