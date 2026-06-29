@@ -22,8 +22,10 @@ system. Four shared library crates + five app binaries:
   `note_to_frequency`, `is_in_tune`, `Note` with a `midi` field), `smooth` (`Smoother`),
   `detect_frequency` (**pYIN**, `pyin` crate — searches only `MIN_HZ..=MAX_HZ` ≈ 70–1000 Hz and
   gates on pYIN's own voiced flag, so sub-bass rumble / upper-partial locks can't be mistaken for
-  the note — a real-mic failure of the old McLeod detector), `capture::run_capture` (cpal stream + 50 ms loop, calls a
-  `sink(Option<Note>) -> bool` that returns `false` to stop), and `cents_color` (→ `[f32;3]`).
+  the note — a real-mic failure of the old McLeod detector), `capture::run_capture` (cpal stream +
+  50 ms loop, calls a `sink(Option<f64> freq_hz, f32 level) -> bool` that returns `false` to stop;
+  `level` is the window RMS, delivered every tick even during silence so a mic meter works), the
+  `level_norm` RMS→0..1 dB-scale meter helper, and `cents_color` (→ `[f32;3]`).
   Used by `tuner`, `karaoke`, and `vocalize`.
 - **`media`** (lib) — now-playing + lyrics sources: `player` (MPRIS loop delivering a neutral
   `PlayerEvent` to a `sink(PlayerEvent) -> bool`), `sync::TimelineSync`, `cue` (`CueEntry` +
@@ -85,7 +87,9 @@ system. Four shared library crates + five app binaries:
   swing is forgiven while a pitch that's out-of-window >~1/3 of the time still can't collect (no
   false positives). **Octave matching** is selectable (tray **Oitava exata**, `octave_strict`,
   default *on*): strict requires the exact octave; off folds to pitch class (so any octave passes,
-  for voices whose range differs from the reference). A 33 ms gated tick drives
+  for voices whose range differs from the reference). A **mic-level meter** (`mic_meter`, a
+  segmented green→amber→red bar fed by `pitch::level_norm(mic_level)`) sits under the readout so the
+  user can see the mic is being heard even before a pitch locks. A 33 ms gated tick drives
   sustain timing + the success flash. `VocalizeConfig { enabled, audible, scale_root,
   scale_kind_idx, mode_idx, play_style_idx, timbre_idx, cents_window, sustain_ms, octave_strict }`
   persists the tray choices (Tonalidade, Escala, Modo, Reprodução, Timbre, Tolerância, Sustentação,

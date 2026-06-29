@@ -6,7 +6,7 @@ pub mod detect;
 pub mod note;
 pub mod smooth;
 
-pub use capture::{MIN_CLARITY, WINDOW, run_capture};
+pub use capture::{MIN_CLARITY, WINDOW, level_norm, run_capture};
 pub use color::cents_color;
 pub use detect::detect_frequency;
 pub use note::{

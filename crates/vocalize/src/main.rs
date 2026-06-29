@@ -49,8 +49,9 @@ enum Message {
     SetOctaveStrict(bool),
     /// Replay the current item's reference tone.
     Replay,
-    /// Smoothed fundamental frequency (Hz) from the mic, or `None` on silence.
-    PitchUpdate(Option<f64>),
+    /// Smoothed fundamental frequency (Hz) from the mic (or `None`), plus the
+    /// current input level (RMS) for the mic meter.
+    PitchUpdate(Option<f64>, f32),
     /// 33 ms UI tick driving listen/sustain timing and the success flash.
     Tick,
     /// The on-disk config changed (external edit); reload if it actually differs.
@@ -82,6 +83,8 @@ struct State {
     sung: Option<f64>,
     /// Current sung note (for the readout).
     sung_note: Option<Note>,
+    /// Latest mic input level (RMS), for the level meter.
+    mic_level: f32,
     /// Timestamp of the previous `Tick`, for the frame delta.
     last_tick: Instant,
     /// While `Some` and not yet elapsed, the success flash is showing.
@@ -136,6 +139,7 @@ impl Default for State {
             rng,
             sung: None,
             sung_note: None,
+            mic_level: 0.0,
             last_tick: Instant::now(),
             success_until: None,
             audible: cfg.audible,
@@ -183,6 +187,40 @@ fn freqs_of(item: &[i64]) -> Vec<f64> {
     item.iter()
         .map(|&m| pitch::note_to_frequency(m as f64, pitch::A4))
         .collect()
+}
+
+/// A compact segmented mic-level meter, so the user can see the mic is being
+/// heard even before a pitch locks (green → amber → red near clipping).
+fn mic_meter(rms: f32) -> Element<'static, Message> {
+    const SEGS: usize = 14;
+    let lit = (pitch::level_norm(rms) * SEGS as f32).round() as usize;
+    let mut bars = row![].spacing(2).align_y(iced::Center);
+    for i in 0..SEGS {
+        let frac = i as f32 / SEGS as f32;
+        let color = if i >= lit {
+            Color::from_rgba(1.0, 1.0, 1.0, 0.12) // unlit
+        } else if frac > 0.85 {
+            Color::from_rgb(0.90, 0.25, 0.25) // near clipping
+        } else if frac > 0.65 {
+            Color::from_rgb(0.95, 0.75, 0.20)
+        } else {
+            Color::from_rgb(0.30, 0.80, 0.45)
+        };
+        bars = bars.push(
+            container(text(""))
+                .width(iced::Length::Fixed(6.0))
+                .height(iced::Length::Fixed(8.0))
+                .style(move |_theme| container::Style {
+                    background: Some(iced::Background::Color(color)),
+                    border: iced::Border {
+                        radius: 2.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+        );
+    }
+    bars.into()
 }
 
 impl State {
@@ -298,9 +336,10 @@ impl overlay::OverlayApp for State {
                 self.last_tick = Instant::now();
                 self.persist();
             }
-            Message::PitchUpdate(freq) => {
+            Message::PitchUpdate(freq, level) => {
                 self.sung_note = freq.map(|f| pitch::frequency_to_note(f, pitch::A4));
                 self.sung = self.sung_note.map(|n| n.midi + n.cents / 100.0);
+                self.mic_level = level;
                 // SCENO_DEBUG: target item vs. what was heard, to diagnose
                 // detection/device issues against a known input (e.g. a piano).
                 overlay::debug(
@@ -474,6 +513,7 @@ impl overlay::OverlayApp for State {
             text(prompt).size(18.0).color(Color::WHITE),
             chips,
             text(you_label).size(16.0).color(you_color),
+            mic_meter(self.mic_level),
         ]
         .align_x(iced::Center)
         .spacing(8);
@@ -550,7 +590,9 @@ fn event_stream() -> BoxStream<'static, Message> {
     }
 
     std::thread::spawn(move || {
-        pitch::run_capture(|freq| tx.unbounded_send(Message::PitchUpdate(freq)).is_ok());
+        pitch::run_capture(|freq, level| {
+            tx.unbounded_send(Message::PitchUpdate(freq, level)).is_ok()
+        });
     });
     Box::pin(rx)
 }
