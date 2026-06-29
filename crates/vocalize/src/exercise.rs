@@ -280,6 +280,75 @@ fn cents_from_class(sung_midi: f64, class: i64) -> f64 {
 mod tests {
     use super::*;
 
+    /// Drive realistic singing through the *actual* runtime chain
+    /// (`pitch::Smoother` → `frequency_to_note` → `Matcher`) and return the ms at
+    /// which the single target collects, or `None` if it never does within `secs`.
+    /// `offset_cents` = steady sharp/flat error; `vibrato_cents` = ± vibrato depth.
+    fn time_to_collect(
+        target_midi: i64,
+        sing_midi: i64,
+        offset_cents: f64,
+        vibrato_cents: f64,
+        cents_window: f64,
+        sustain_ms: f64,
+        secs: f64,
+    ) -> Option<f64> {
+        use std::f64::consts::PI;
+        let dt_ms = 33.0; // matcher tick cadence
+        let base = pitch::note_to_frequency(sing_midi as f64 + offset_cents / 100.0, pitch::A4);
+        let mut sm = pitch::Smoother::default();
+        let mut m = Matcher::new(&[target_midi], cents_window, sustain_ms);
+        let frames = (secs * 1000.0 / dt_ms) as usize;
+        for i in 0..frames {
+            let t = i as f64 * dt_ms / 1000.0;
+            let vib = 2f64.powf((vibrato_cents / 1200.0) * (2.0 * PI * 5.5 * t).sin());
+            let smoothed = sm.update(Some(base * vib));
+            let sung = smoothed.map(|f| {
+                let n = pitch::frequency_to_note(f, pitch::A4);
+                n.midi + n.cents / 100.0
+            });
+            if !m.update(sung, dt_ms).is_empty() {
+                return Some(i as f64 * dt_ms);
+            }
+        }
+        None
+    }
+
+    // End-to-end matcher-chain behavior (default ±50¢ window, 500ms sustain).
+    const W: f64 = 50.0;
+    const S: f64 = 500.0;
+
+    #[test]
+    fn steady_on_pitch_collects_promptly() {
+        // A clean sustained vowel should pass at roughly the sustain time.
+        let ms = time_to_collect(60, 60, 0.0, 0.0, W, S, 4.0).expect("should collect");
+        assert!(ms <= S + 100.0, "took {ms} ms");
+    }
+
+    #[test]
+    fn vibrato_is_tolerated() {
+        // The EMA smoother averages vibrato toward the center, so even wide
+        // vibrato still collects (it shouldn't punish natural singing).
+        for vib in [20.0, 40.0, 70.0] {
+            assert!(
+                time_to_collect(60, 60, 0.0, vib, W, S, 4.0).is_some(),
+                "±{vib}¢ vibrato never collected"
+            );
+        }
+    }
+
+    #[test]
+    fn octave_errors_still_match() {
+        // Octave-folded matching: singing the target an octave up passes.
+        assert!(time_to_collect(60, 72, 0.0, 20.0, W, S, 4.0).is_some());
+    }
+
+    #[test]
+    fn clearly_off_pitch_is_rejected() {
+        // 55¢ flat is past the ±50¢ window (closer to the next semitone): no pass.
+        assert!(time_to_collect(60, 60, -55.0, 0.0, W, S, 4.0).is_none());
+    }
+
     #[test]
     fn scale_kind_idx_roundtrips() {
         for k in ScaleKind::ALL {

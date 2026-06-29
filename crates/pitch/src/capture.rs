@@ -15,7 +15,14 @@ use crate::smooth::Smoother;
 /// Analysis window size (samples) — also the minimum buffer fill before detecting.
 pub const WINDOW: usize = 4096;
 /// McLeod clarity threshold (0..1) below which a frame is treated as no pitch.
-pub const MIN_CLARITY: f64 = 0.6;
+///
+/// Tuned for **voice in a real room**: a sung vowel picked up by a laptop mic
+/// with background noise often only reaches a clarity of ~0.4–0.5, so the old
+/// 0.6 gate silently rejected *every* frame at realistic SNRs (see
+/// `tests/detection.rs`), which read as "the mic isn't being heard". 0.4 still
+/// rejects pure noise (which sits well below it), so it doesn't false-detect a
+/// pitch from silence.
+pub const MIN_CLARITY: f64 = 0.4;
 
 /// Open the default input device and run the capture/analysis loop, calling
 /// `sink` with each smoothed frequency (Hz). Blocks; intended to own a dedicated

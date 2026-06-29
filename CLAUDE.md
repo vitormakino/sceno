@@ -183,7 +183,12 @@ Style/on-off/reference/instrument are persisted as
   are generic over any serde type.
 - **Tracing:** `SCENO_DEBUG=1` enables stderr traces via `overlay::debug("<tag>", args)`.
 - **Pitch detection** stays on `pitch-detection` (pure Rust, no C deps). pYIN/microdsp are
-  documented future options in the spec, not adopted.
+  documented future options in the spec, not adopted. `pitch::MIN_CLARITY` is **0.4**, tuned for
+  voice in a real (noisy) room — the McLeod clarity of a sung vowel over a laptop mic often only
+  reaches ~0.4–0.5, so a higher gate silently drops every frame ("mic not heard"). The synthetic
+  voice integration test `crates/pitch/tests/detection.rs` (harmonics + vibrato + noise, swept
+  across the range at both sample rates) is the place to re-validate any change to the detector or
+  this threshold; it's the regression guard for "the mic isn't picking me up".
 
 ## Verifying changes
 
