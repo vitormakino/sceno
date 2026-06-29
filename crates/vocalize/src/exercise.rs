@@ -210,6 +210,11 @@ pub fn note_label(midi: i64) -> String {
     format!("{} ({})", SOLFEGE[midi.rem_euclid(12) as usize], letter)
 }
 
+/// How fast the hold decays while out of the window, relative to how fast it
+/// accumulates while in. >1 means an off-pitch stretch costs more than it gained,
+/// so only a pitch that's in-window the clear majority of the time can collect.
+const OUT_DECAY: f64 = 2.0;
+
 /// Tracks how long each still-uncollected target has been sung in-tune and reports
 /// targets as "collected" once held for the sustain time. Matching is octave-folded:
 /// only the pitch class matters.
@@ -237,6 +242,13 @@ impl Matcher {
     /// Feed one analysis frame. `sung` is a continuous MIDI value (note + cents/100)
     /// or `None` on silence; `dt_ms` is the time since the previous frame. Returns
     /// the indices that became collected on this frame.
+    ///
+    /// Holding in-window accumulates time (capped at `sustain_ms`, so excess can't
+    /// be "banked"); leaving the window *decays* the hold at [`OUT_DECAY`]× rather
+    /// than zeroing it, so a brief onset wobble or vibrato swing doesn't throw away
+    /// near-complete progress. Because the decay is faster than the accumulation,
+    /// a pitch that's out of the window more than ~1/3 of the time still falls to
+    /// zero and never collects — so this forgives flutter without false positives.
     pub fn update(&mut self, sung: Option<f64>, dt_ms: f64) -> Vec<usize> {
         let mut newly = Vec::new();
         for i in 0..self.classes.len() {
@@ -247,13 +259,13 @@ impl Matcher {
                 .map(|p| cents_from_class(p, self.classes[i]).abs() <= self.cents_window)
                 .unwrap_or(false);
             if in_window {
-                self.held_ms[i] += dt_ms;
+                self.held_ms[i] = (self.held_ms[i] + dt_ms).min(self.sustain_ms);
                 if self.held_ms[i] >= self.sustain_ms {
                     self.collected[i] = true;
                     newly.push(i);
                 }
             } else {
-                self.held_ms[i] = 0.0;
+                self.held_ms[i] = (self.held_ms[i] - dt_ms * OUT_DECAY).max(0.0);
             }
         }
         newly
@@ -503,22 +515,40 @@ mod tests {
     }
 
     #[test]
-    fn out_of_window_resets_hold() {
+    fn brief_excursion_decays_but_does_not_reset() {
+        // Held 300ms, then a short 50ms dip out of window: with OUT_DECAY=2 the
+        // hold drops by 100ms (to 200ms), not to zero — progress is preserved.
         let mut m = Matcher::new(&[60], 50.0, 500.0);
         m.update(Some(60.0), 300.0);
-        m.update(Some(63.0), 100.0); // 3 semitones off → resets
-        // Now needs a full 500ms again.
-        for _ in 0..4 {
-            assert!(m.update(Some(60.0), 100.0).is_empty());
+        m.update(Some(63.0), 50.0); // out → 300 - 50*2 = 200
+        // Only ~300ms more in-window is needed (not a fresh 500ms): 200→…→500.
+        for _ in 0..2 {
+            assert!(m.update(Some(60.0), 100.0).is_empty()); // 300, 400
         }
-        assert_eq!(m.update(Some(60.0), 100.0), vec![0]);
+        assert_eq!(m.update(Some(60.0), 100.0), vec![0]); // 500 → collect
     }
 
     #[test]
-    fn silence_resets_hold() {
+    fn mostly_off_pitch_never_collects() {
+        // False-positive guard: alternating in/out where out dominates can never
+        // reach sustain — the 2× decay outpaces the accumulation.
+        let mut m = Matcher::new(&[60], 50.0, 500.0);
+        for _ in 0..60 {
+            m.update(Some(60.0), 50.0); // +50 in
+            m.update(Some(63.0), 50.0); // -100 out → net -50 per pair
+        }
+        assert!(!m.all_collected(), "off-pitch flutter should not collect");
+    }
+
+    #[test]
+    fn sustained_silence_decays_to_zero() {
         let mut m = Matcher::new(&[60], 50.0, 500.0);
         m.update(Some(60.0), 300.0);
-        m.update(None, 100.0);
+        // Enough silence to fully decay (300 / (100*2) → ~2 frames), then it must
+        // take a full hold again, never collecting on silence alone.
+        for _ in 0..4 {
+            m.update(None, 100.0);
+        }
         assert!(!m.all_collected());
     }
 
