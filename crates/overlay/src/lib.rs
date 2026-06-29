@@ -10,6 +10,7 @@ mod paths;
 mod settings;
 mod stack;
 mod trace;
+mod widgets;
 pub use paths::{cache_dir, config_dir, data_dir};
 pub use settings::{
     FontSize, load_config, load_config_checked, load_or_seed, reset_defaults, save,
@@ -17,6 +18,7 @@ pub use settings::{
 };
 pub use stack::{Margin, margin_for_slot};
 pub use trace::{debug, debug_enabled};
+pub use widgets::level_meter;
 
 use iced::Element;
 use iced::Subscription;

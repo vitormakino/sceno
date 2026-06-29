@@ -16,7 +16,8 @@ system. Four shared library crates + five app binaries:
   `load_or_seed::<T>` which materializes a default `config.json` on first run, and
   `watch_config_stream` which polls the config's mtime ~1 Hz and emits a message on change so
   external edits apply live), XDG paths (`config_dir`/`cache_dir`/`data_dir`),
-  `ensure_single_instance`, event-driven auto-stacking, and `SCENO_DEBUG` tracing
+  `ensure_single_instance`, event-driven auto-stacking, a shared `level_meter` widget (segmented
+  bar from a 0..1 level, used as the mic-input indicator), and `SCENO_DEBUG` tracing
   (`overlay::debug(tag, args)`).
 - **`pitch`** (lib) — mic capture + pitch math: `note` (`frequency_to_note`,
   `note_to_frequency`, `is_in_tune`, `Note` with a `midi` field), `smooth` (`Smoother`),
@@ -45,7 +46,8 @@ system. Four shared library crates + five app binaries:
   (positive advances the lyrics, negative delays); the tray's **Sincronia** submenu nudges by
   ±100 ms or clears the current song's entry (a `0` offset removes the entry), and an active
   offset shows as a dim `⏱ ±NNN ms` chip in the overlay.
-- **`tuner`** (bin) — vocal tuner via `pitch`: mic → note + tuning meter.
+- **`tuner`** (bin) — vocal tuner via `pitch`: mic → note + tuning meter. When no pitch is locked
+  but the mic has signal, shows `overlay::level_meter` instead of an empty strip (mic-alive feedback).
 - **`karaoke`** (bin) — UltraStar karaoke: matches the playing track to a local `.txt` in its
   library and renders a scrolling Canvas pitch-lane (`lane.rs`), plus a live mic cursor
   (own `pitch::run_capture` stream) colored green when the sung pitch matches the target note
@@ -87,8 +89,9 @@ system. Four shared library crates + five app binaries:
   swing is forgiven while a pitch that's out-of-window >~1/3 of the time still can't collect (no
   false positives). **Octave matching** is selectable (tray **Oitava exata**, `octave_strict`,
   default *on*): strict requires the exact octave; off folds to pitch class (so any octave passes,
-  for voices whose range differs from the reference). A **mic-level meter** (`mic_meter`, a
-  segmented green→amber→red bar fed by `pitch::level_norm(mic_level)`) sits under the readout so the
+  for voices whose range differs from the reference). A **mic-level meter**
+  (`overlay::level_meter`, a segmented green→amber→red bar fed by `pitch::level_norm(mic_level)`,
+  shared with `tuner`) sits under the readout so the
   user can see the mic is being heard even before a pitch locks. A 33 ms gated tick drives
   sustain timing + the success flash. `VocalizeConfig { enabled, audible, scale_root,
   scale_kind_idx, mode_idx, play_style_idx, timbre_idx, cents_window, sustain_ms, octave_strict }`

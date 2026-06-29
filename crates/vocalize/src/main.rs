@@ -189,40 +189,6 @@ fn freqs_of(item: &[i64]) -> Vec<f64> {
         .collect()
 }
 
-/// A compact segmented mic-level meter, so the user can see the mic is being
-/// heard even before a pitch locks (green → amber → red near clipping).
-fn mic_meter(rms: f32) -> Element<'static, Message> {
-    const SEGS: usize = 14;
-    let lit = (pitch::level_norm(rms) * SEGS as f32).round() as usize;
-    let mut bars = row![].spacing(2).align_y(iced::Center);
-    for i in 0..SEGS {
-        let frac = i as f32 / SEGS as f32;
-        let color = if i >= lit {
-            Color::from_rgba(1.0, 1.0, 1.0, 0.12) // unlit
-        } else if frac > 0.85 {
-            Color::from_rgb(0.90, 0.25, 0.25) // near clipping
-        } else if frac > 0.65 {
-            Color::from_rgb(0.95, 0.75, 0.20)
-        } else {
-            Color::from_rgb(0.30, 0.80, 0.45)
-        };
-        bars = bars.push(
-            container(text(""))
-                .width(iced::Length::Fixed(6.0))
-                .height(iced::Length::Fixed(8.0))
-                .style(move |_theme| container::Style {
-                    background: Some(iced::Background::Color(color)),
-                    border: iced::Border {
-                        radius: 2.0.into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                }),
-        );
-    }
-    bars.into()
-}
-
 impl State {
     /// Move to a fresh random item and rebuild the matcher.
     fn advance(&mut self) {
@@ -513,7 +479,7 @@ impl overlay::OverlayApp for State {
             text(prompt).size(18.0).color(Color::WHITE),
             chips,
             text(you_label).size(16.0).color(you_color),
-            mic_meter(self.mic_level),
+            overlay::level_meter(pitch::level_norm(self.mic_level)),
         ]
         .align_x(iced::Center)
         .spacing(8);

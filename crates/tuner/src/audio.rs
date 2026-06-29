@@ -9,5 +9,5 @@ use crate::Message;
 /// Owns the cpal input stream + analysis loop (via [`pitch::run_capture`]);
 /// sends `PitchUpdate` until the app exits (the receiver is dropped).
 pub fn run(tx: UnboundedSender<Message>) {
-    pitch::run_capture(|freq, _level| tx.unbounded_send(Message::PitchUpdate(freq)).is_ok());
+    pitch::run_capture(|freq, level| tx.unbounded_send(Message::PitchUpdate(freq, level)).is_ok());
 }

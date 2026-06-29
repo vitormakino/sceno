@@ -22,8 +22,9 @@ pub const REFERENCES: [f64; 4] = [432.0, 440.0, 442.0, 443.0];
 #[cfg_attr(target_os = "linux", iced_layershell::to_layer_message)]
 #[derive(Debug, Clone)]
 enum Message {
-    /// Smoothed fundamental frequency (Hz) from the mic, or `None` on silence.
-    PitchUpdate(Option<f64>),
+    /// Smoothed fundamental frequency (Hz) from the mic (or `None`), plus the
+    /// current input level (RMS) for the mic meter.
+    PitchUpdate(Option<f64>, f32),
     SetEnabled(bool),
     SetMeterStyle(meter::MeterStyle),
     /// Change the A4 reference pitch (Hz).
@@ -47,6 +48,8 @@ struct State {
     a4_hz: f64,
     instrument: Instrument,
     strobe_phase: f32,
+    /// Latest mic input level (RMS), for the level meter.
+    mic_level: f32,
 }
 
 impl Default for State {
@@ -60,6 +63,7 @@ impl Default for State {
             a4_hz: cfg.a4_hz,
             instrument: Instrument::from_idx(cfg.instrument_idx),
             strobe_phase: 0.0,
+            mic_level: 0.0,
         }
     }
 }
@@ -70,6 +74,20 @@ fn note_from(freq: f64, a4: f64, inst: Instrument) -> Note {
     match pitch::nearest_target(freq, a4, inst.targets()) {
         Some((midi, cents)) => Note::at_midi(midi, cents),
         None => pitch::frequency_to_note(freq, a4),
+    }
+}
+
+/// The translucent dark rounded "pill" the readout (or mic meter) sits in.
+fn pill_style(_theme: &iced::Theme) -> container::Style {
+    container::Style {
+        background: Some(iced::Background::Color(Color::from_rgba(
+            0.0, 0.0, 0.0, 0.45,
+        ))),
+        border: iced::Border {
+            radius: 12.0.into(),
+            ..Default::default()
+        },
+        ..Default::default()
     }
 }
 
@@ -120,8 +138,9 @@ impl overlay::OverlayApp for State {
     }
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::PitchUpdate(freq) => {
+            Message::PitchUpdate(freq, level) => {
                 self.last_freq = freq;
+                self.mic_level = level;
                 self.remap();
             }
             Message::SetEnabled(on) => {
@@ -179,7 +198,20 @@ impl overlay::OverlayApp for State {
             return empty().into();
         }
         let Some(n) = &self.note else {
-            return empty().into();
+            // No pitch locked: if the mic is picking up sound, show its level so
+            // the user can tell capture is working (vs. a dead/muted input).
+            let level = pitch::level_norm(self.mic_level);
+            if level <= 0.0 {
+                return empty().into();
+            }
+            return container(
+                container(overlay::level_meter(level))
+                    .padding([6, 14])
+                    .style(pill_style),
+            )
+            .center_x(iced::Fill)
+            .center_y(iced::Fill)
+            .into();
         };
         let [r, g, b] = pitch::cents_color(n.cents);
         let color = Color::from_rgb(r, g, b);
@@ -207,23 +239,10 @@ impl overlay::OverlayApp for State {
         .align_x(iced::Center)
         .spacing(2);
 
-        container(
-            container(body)
-                .padding([6, 18])
-                .style(|_theme| container::Style {
-                    background: Some(iced::Background::Color(Color::from_rgba(
-                        0.0, 0.0, 0.0, 0.45,
-                    ))),
-                    border: iced::Border {
-                        radius: 12.0.into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                }),
-        )
-        .center_x(iced::Fill)
-        .center_y(iced::Fill)
-        .into()
+        container(container(body).padding([6, 18]).style(pill_style))
+            .center_x(iced::Fill)
+            .center_y(iced::Fill)
+            .into()
     }
     fn subscription(&self) -> Subscription<Message> {
         let events = Subscription::run(event_stream);
@@ -320,6 +339,7 @@ mod tests {
             a4_hz: 440.0,
             instrument: Instrument::Chromatic,
             strobe_phase: 0.0,
+            mic_level: 0.0,
         };
         s.remap();
         // Chromatic: 110 Hz is A2 (nearest note) too — check octave.
