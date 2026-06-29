@@ -13,6 +13,7 @@ pitch = { path = "../pitch" }
 iced = { workspace = true }
 futures.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 cpal = "0.15"
 
 # The system tray (ksni) and the `#[to_layer_message]` macro (iced_layershell)
@@ -20,6 +21,3 @@ cpal = "0.15"
 [target.'cfg(target_os = "linux")'.dependencies]
 iced_layershell.workspace = true
 ksni.workspace = true
-
-[dev-dependencies]
-serde_json.workspace = true

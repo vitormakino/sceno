@@ -62,7 +62,10 @@ system. Four shared library crates + five app binaries:
 - **`vocalize`** (bin) — call-and-response ear/voice trainer via `pitch`: plays + shows a
   target note or chord and only advances once the user sings it. Pure exercise logic
   (`exercise.rs`: `Scale`/`ScaleKind`/`Mode`, `PlayStyle`, `item_at`, the octave-folded
-  `Matcher`, `note_label`) is unit-tested. `Mode` picks the shape — Notas / Power chord
+  `Matcher`, `note_label`) is unit-tested. `ScaleKind` (tray **Escala**, indices append-only) is
+  Maior / Menor / Cromática / Dórico / Frígio / Lídio / Mixolídio / Lócrio / Menor harmônica /
+  Menor melódica; the tray menu builds itself from `ScaleKind::ALL`, so a new kind needs only an
+  enum + `degrees`/`label`/index arm. `Mode` picks the shape — Notas / Power chord
   (root + an *absolute* perfect fifth, `[at(d), at(d)+7]`, so it stays perfect on every
   degree) / Tríade (`d,d+2,d+4`) / Tétrade (diatonic 7th `d,d+2,d+4,d+6`); a chord is
   collected one note at a time, in any order. `tone.rs` renders the reference tone on demand
@@ -78,6 +81,11 @@ system. Four shared library crates + five app binaries:
   sustain timing + the success flash. `VocalizeConfig { enabled, audible, scale_root,
   scale_kind_idx, mode_idx, play_style_idx, timbre_idx, cents_window, sustain_ms }` persists the tray
   choices (Tonalidade, Escala, Modo, Reprodução, Timbre, Tolerância, Sustentação, Som, Repetir tom).
+  **Per-note practice stats** (`stats.rs`): each time a target is collected, the time from the
+  item being armed (present phase ended) to collection is accumulated per pitch class, and the
+  hardest class (highest avg, ≥3 samples) shows as a dim `⌛ mais difícil: …` line in the overlay.
+  Stats live in `<data_dir>/vocalize/stats.json` — *not* in the config — so "Restaurar padrões"
+  never wipes practice history; the tray **"Limpar estatísticas"** (`ResetStats`) clears them.
 
 Each app owns a per-app data folder `~/.local/share/sceno/<app>` (`overlay::data_dir("<app>")`),
 so file kinds don't intermingle: `karaoke` and `metronome` read UltraStar `.txt` from

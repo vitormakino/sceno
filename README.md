@@ -21,9 +21,11 @@ app — each app is its own small binary.
   tempo live from the system audio. Marks the beat with an audible click and a
   visual flash, each toggleable independently.
 - **`vocalize`** — a singing ear trainer. Plays + shows a note or chord; waits
-  for you to sing it before advancing. Adjustable scale, mode (notes, power
-  chord, triad, tetrad), chord playback (together or arpeggio), tone timbre
-  (electric piano or sine), tolerance, and sustain from the tray.
+  for you to sing it before advancing. Adjustable scale (major, minor, chromatic,
+  the church modes, harmonic/melodic minor), mode (notes, power chord, triad,
+  tetrad), chord playback (together or arpeggio), tone timbre (electric piano or
+  sine), tolerance, and sustain from the tray. Tracks how long you take to nail
+  each note and surfaces your weakest pitch class.
 
 ## Building
 

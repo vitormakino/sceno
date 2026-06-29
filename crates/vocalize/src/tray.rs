@@ -240,6 +240,14 @@ impl ksni::Tray for VocalizeTray {
             .into(),
             MenuItem::Separator,
             StandardItem {
+                label: "Limpar estatísticas".into(),
+                activate: Box::new(|this: &mut Self| {
+                    let _ = this.tx.unbounded_send(Message::ResetStats);
+                }),
+                ..Default::default()
+            }
+            .into(),
+            StandardItem {
                 label: "Restaurar padrões".into(),
                 activate: Box::new(|this: &mut Self| {
                     let _ = this.tx.unbounded_send(Message::ResetDefaults);

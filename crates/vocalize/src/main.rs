@@ -10,6 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 mod config;
 mod exercise;
+mod stats;
 mod tone;
 #[cfg(target_os = "linux")]
 mod tray;
@@ -54,6 +55,8 @@ enum Message {
     ReloadConfig,
     /// Rewrite the config with defaults and rebuild from it (tray "Restaurar padrões").
     ResetDefaults,
+    /// Clear the per-note practice statistics (tray "Limpar estatísticas").
+    ResetStats,
 }
 
 struct State {
@@ -84,6 +87,11 @@ struct State {
     /// While `Some` and not elapsed, the reference tone is playing and the matcher
     /// is disabled (so the mic can't auto-pass on the tone bleeding in).
     present_until: Option<Instant>,
+    /// Per-note practice statistics (time-to-sing per pitch class).
+    stats: stats::Stats,
+    /// When the current item became matchable (the present phase ended); used to
+    /// measure how long each target takes to nail.
+    item_armed_at: Instant,
 }
 
 impl Default for State {
@@ -127,6 +135,8 @@ impl Default for State {
             audible: cfg.audible,
             tone,
             present_until: Some(Instant::now() + present),
+            stats: stats::load(),
+            item_armed_at: Instant::now(),
         }
     }
 }
@@ -221,6 +231,8 @@ impl State {
             self.prev_degree = degree;
             self.item = exercise::item_at(&self.scale, self.mode, degree);
             self.present_until = None;
+            // A silent structural change arms a fresh target immediately.
+            self.item_armed_at = Instant::now();
         }
         // Re-arm the matcher for the (possibly new) item under the new tolerance.
         self.matcher = Matcher::new(&self.item, self.cents_window, self.sustain_ms);
@@ -288,10 +300,20 @@ impl overlay::OverlayApp for State {
                         return Task::none();
                     }
                     self.present_until = None;
+                    // The item is now matchable: start the time-to-sing clock.
+                    self.item_armed_at = now;
                 }
                 let newly = self.matcher.update(self.sung, dt);
-                if !newly.is_empty() && self.matcher.all_collected() {
-                    self.success_until = Some(now + FLASH);
+                if !newly.is_empty() {
+                    // Record how long each just-collected target took to nail.
+                    let elapsed_ms = (now - self.item_armed_at).as_secs_f64() * 1000.0;
+                    for &i in &newly {
+                        self.stats.record(self.item[i].rem_euclid(12), elapsed_ms);
+                    }
+                    stats::save(&self.stats);
+                    if self.matcher.all_collected() {
+                        self.success_until = Some(now + FLASH);
+                    }
                 }
             }
             Message::SetAudible(on) => {
@@ -356,6 +378,10 @@ impl overlay::OverlayApp for State {
             Message::ResetDefaults => {
                 self.apply_config(overlay::reset_defaults(APP));
             }
+            Message::ResetStats => {
+                self.stats.clear();
+                stats::save(&self.stats);
+            }
             // Absorbs the guarded `Replay` (when disabled) plus, on Linux, the extra
             // variants the `#[to_layer_message]` macro injects (MarginChange, …).
             _ => {}
@@ -400,13 +426,26 @@ impl overlay::OverlayApp for State {
                 Color::from_rgba(1.0, 1.0, 1.0, 0.6),
             ),
         };
-        let body = column![
+        let mut body = column![
             text(prompt).size(18.0).color(Color::WHITE),
             chips,
             text(you_label).size(16.0).color(you_color),
         ]
         .align_x(iced::Center)
         .spacing(8);
+
+        // Per-note practice hint: the pitch class you take longest to nail.
+        if let Some((class, avg_ms)) = self.stats.hardest() {
+            body = body.push(
+                text(format!(
+                    "⌛ mais difícil: {} (~{:.1}s)",
+                    exercise::note_label(60 + class as i64),
+                    avg_ms / 1000.0
+                ))
+                .size(13.0)
+                .color(Color::from_rgba(1.0, 0.85, 0.4, 0.8)),
+            );
+        }
         container(
             container(body)
                 .padding([10, 18])

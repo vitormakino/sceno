@@ -1,12 +1,20 @@
 //! Pure exercise logic: scales, item generation, note labels, and the pitch
 //! matcher. No audio, no UI — fully unit-tested.
 
-/// A musical scale kind. Indices are stable (persisted in config).
+/// A musical scale kind. Indices are stable and append-only (persisted in
+/// config), so new kinds must be added at the end to keep existing configs valid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScaleKind {
     Major,
     NaturalMinor,
     Chromatic,
+    Dorian,
+    Phrygian,
+    Lydian,
+    Mixolydian,
+    Locrian,
+    HarmonicMinor,
+    MelodicMinor,
 }
 
 impl ScaleKind {
@@ -15,12 +23,26 @@ impl ScaleKind {
             ScaleKind::Major => 0,
             ScaleKind::NaturalMinor => 1,
             ScaleKind::Chromatic => 2,
+            ScaleKind::Dorian => 3,
+            ScaleKind::Phrygian => 4,
+            ScaleKind::Lydian => 5,
+            ScaleKind::Mixolydian => 6,
+            ScaleKind::Locrian => 7,
+            ScaleKind::HarmonicMinor => 8,
+            ScaleKind::MelodicMinor => 9,
         }
     }
     pub fn from_idx(i: usize) -> Self {
         match i {
             1 => ScaleKind::NaturalMinor,
             2 => ScaleKind::Chromatic,
+            3 => ScaleKind::Dorian,
+            4 => ScaleKind::Phrygian,
+            5 => ScaleKind::Lydian,
+            6 => ScaleKind::Mixolydian,
+            7 => ScaleKind::Locrian,
+            8 => ScaleKind::HarmonicMinor,
+            9 => ScaleKind::MelodicMinor,
             _ => ScaleKind::Major,
         }
     }
@@ -29,20 +51,42 @@ impl ScaleKind {
             ScaleKind::Major => "Maior",
             ScaleKind::NaturalMinor => "Menor",
             ScaleKind::Chromatic => "Cromática",
+            ScaleKind::Dorian => "Dórico",
+            ScaleKind::Phrygian => "Frígio",
+            ScaleKind::Lydian => "Lídio",
+            ScaleKind::Mixolydian => "Mixolídio",
+            ScaleKind::Locrian => "Lócrio",
+            ScaleKind::HarmonicMinor => "Menor harmônica",
+            ScaleKind::MelodicMinor => "Menor melódica",
         }
     }
-    /// Semitone offsets of the scale degrees within one octave.
+    /// Semitone offsets of the scale degrees within one octave. The modes and
+    /// minor variants are 7-degree; the melodic minor is its ascending form.
     pub fn degrees(self) -> &'static [i64] {
         match self {
             ScaleKind::Major => &[0, 2, 4, 5, 7, 9, 11],
             ScaleKind::NaturalMinor => &[0, 2, 3, 5, 7, 8, 10],
             ScaleKind::Chromatic => &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+            ScaleKind::Dorian => &[0, 2, 3, 5, 7, 9, 10],
+            ScaleKind::Phrygian => &[0, 1, 3, 5, 7, 8, 10],
+            ScaleKind::Lydian => &[0, 2, 4, 6, 7, 9, 11],
+            ScaleKind::Mixolydian => &[0, 2, 4, 5, 7, 9, 10],
+            ScaleKind::Locrian => &[0, 1, 3, 5, 6, 8, 10],
+            ScaleKind::HarmonicMinor => &[0, 2, 3, 5, 7, 8, 11],
+            ScaleKind::MelodicMinor => &[0, 2, 3, 5, 7, 9, 11],
         }
     }
-    pub const ALL: [ScaleKind; 3] = [
+    pub const ALL: [ScaleKind; 10] = [
         ScaleKind::Major,
         ScaleKind::NaturalMinor,
         ScaleKind::Chromatic,
+        ScaleKind::Dorian,
+        ScaleKind::Phrygian,
+        ScaleKind::Lydian,
+        ScaleKind::Mixolydian,
+        ScaleKind::Locrian,
+        ScaleKind::HarmonicMinor,
+        ScaleKind::MelodicMinor,
     ];
 }
 
@@ -256,6 +300,38 @@ mod tests {
         assert_eq!(ScaleKind::Major.degrees().len(), 7);
         assert_eq!(ScaleKind::NaturalMinor.degrees().len(), 7);
         assert_eq!(ScaleKind::Chromatic.degrees().len(), 12);
+        // Every mode / minor-variant is a 7-degree scale.
+        for k in [
+            ScaleKind::Dorian,
+            ScaleKind::Phrygian,
+            ScaleKind::Lydian,
+            ScaleKind::Mixolydian,
+            ScaleKind::Locrian,
+            ScaleKind::HarmonicMinor,
+            ScaleKind::MelodicMinor,
+        ] {
+            assert_eq!(k.degrees().len(), 7, "{:?}", k);
+        }
+    }
+
+    #[test]
+    fn mode_degrees_are_correct() {
+        // Characteristic tones: Lydian #4, Mixolydian b7, Dorian (maj6 over minor),
+        // harmonic minor's raised 7th, melodic minor's raised 6th+7th.
+        assert_eq!(ScaleKind::Dorian.degrees(), &[0, 2, 3, 5, 7, 9, 10]);
+        assert_eq!(ScaleKind::Lydian.degrees(), &[0, 2, 4, 6, 7, 9, 11]);
+        assert_eq!(ScaleKind::Mixolydian.degrees(), &[0, 2, 4, 5, 7, 9, 10]);
+        assert_eq!(ScaleKind::HarmonicMinor.degrees(), &[0, 2, 3, 5, 7, 8, 11]);
+        assert_eq!(ScaleKind::MelodicMinor.degrees(), &[0, 2, 3, 5, 7, 9, 11]);
+    }
+
+    #[test]
+    fn all_kinds_label_and_index_align() {
+        // ALL is in index order, and every kind has a non-empty label.
+        for (i, k) in ScaleKind::ALL.iter().enumerate() {
+            assert_eq!(k.index(), i);
+            assert!(!k.label().is_empty());
+        }
     }
 
     #[test]
