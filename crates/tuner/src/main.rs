@@ -11,8 +11,6 @@ mod audio;
 mod config;
 mod instrument;
 mod meter;
-#[cfg(target_os = "linux")]
-mod tray;
 use instrument::Instrument;
 use pitch::Note;
 
@@ -36,6 +34,11 @@ enum Message {
     ReloadConfig,
     /// Rewrite the config with defaults and rebuild from it (tray "Restaurar padrões").
     ResetDefaults,
+    /// Quit the app (tray "Sair").
+    Quit,
+    /// Pump the macOS menu-bar tray: create it on first tick, then drain clicks.
+    #[cfg(not(target_os = "linux"))]
+    TrayTick,
 }
 
 struct State {
@@ -176,10 +179,22 @@ impl overlay::OverlayApp for State {
                     && on_disk != self.current_config()
                 {
                     self.apply_config(on_disk);
+                    // Reflect the external edit in the macOS menu-bar checkmarks.
+                    #[cfg(not(target_os = "linux"))]
+                    overlay::tray::refresh(|| build_menu(&self.current_config()));
                 }
             }
             Message::ResetDefaults => {
                 self.apply_config(overlay::reset_defaults("tuner"));
+                // Rebuild the macOS tray so its checkmarks/radios revert too.
+                #[cfg(not(target_os = "linux"))]
+                overlay::tray::refresh(|| build_menu(&self.current_config()));
+            }
+            Message::Quit => std::process::exit(0),
+            #[cfg(not(target_os = "linux"))]
+            Message::TrayTick => {
+                let msgs = overlay::tray::pump(|| build_menu(&self.current_config()));
+                return Task::batch(msgs.into_iter().map(Task::done));
             }
             // The `#[to_layer_message]` macro (Linux) adds variants (MarginChange, …)
             // this catch-all absorbs; off Linux the match is already exhaustive.
@@ -245,14 +260,17 @@ impl overlay::OverlayApp for State {
             .into()
     }
     fn subscription(&self) -> Subscription<Message> {
-        let events = Subscription::run(event_stream);
-        let watch = Subscription::run(config_watch_stream);
+        let mut subs = vec![
+            Subscription::run(event_stream),
+            Subscription::run(config_watch_stream),
+        ];
+        // macOS drives its menu-bar tray from `update`, so pump it on a tick.
+        #[cfg(not(target_os = "linux"))]
+        subs.push(Subscription::run(tray_tick_stream));
         if self.enabled && self.style == meter::MeterStyle::Strobe {
-            let ticks = Subscription::run(strobe_tick_stream);
-            Subscription::batch([events, watch, ticks])
-        } else {
-            Subscription::batch([events, watch])
+            subs.push(Subscription::run(strobe_tick_stream));
         }
+        Subscription::batch(subs)
     }
 }
 
@@ -262,27 +280,79 @@ fn config_watch_stream() -> BoxStream<'static, Message> {
     overlay::watch_config_stream("tuner", || Message::ReloadConfig)
 }
 
+/// Build the tray menu from the current config. One definition feeds both
+/// backends: spawned on its own thread on Linux (ksni), pumped from `update` on
+/// macOS (tray-icon). See `overlay::tray`.
+fn build_menu(cfg: &config::TunerConfig) -> overlay::tray::Menu<Message> {
+    use overlay::tray::{Item, Menu};
+    let style = meter::MeterStyle::from_idx(cfg.meter_style_idx);
+    let ref_idx = REFERENCES
+        .iter()
+        .position(|&r| (r - cfg.a4_hz).abs() < 0.5)
+        .unwrap_or(1);
+    let inst = Instrument::from_idx(cfg.instrument_idx);
+    Menu {
+        title: "sceno · tuner".into(),
+        icon_name: "audio-input-microphone".into(),
+        mac_label: "🎤".into(),
+        items: vec![
+            Item::check("Overlay ativo", cfg.enabled, Message::SetEnabled),
+            Item::Separator,
+            Item::sub(
+                "Medidor",
+                vec![Item::radio(
+                    style.index(),
+                    vec![
+                        meter::MeterStyle::Needle.label().into(),
+                        meter::MeterStyle::CenterBar.label().into(),
+                        meter::MeterStyle::Strobe.label().into(),
+                    ],
+                    |idx| Message::SetMeterStyle(meter::MeterStyle::from_idx(idx)),
+                )],
+            ),
+            Item::sub(
+                "Referência",
+                vec![Item::radio(
+                    ref_idx,
+                    REFERENCES.iter().map(|r| format!("{r:.0} Hz")).collect(),
+                    |idx| Message::SetReference(REFERENCES.get(idx).copied().unwrap_or(440.0)),
+                )],
+            ),
+            Item::sub(
+                "Instrumento",
+                vec![Item::radio(
+                    inst.index(),
+                    Instrument::ALL.iter().map(|i| i.label().into()).collect(),
+                    |idx| Message::SetInstrument(Instrument::from_idx(idx)),
+                )],
+            ),
+            Item::Separator,
+            Item::button("Restaurar padrões", Message::ResetDefaults),
+            Item::button("Sair", Message::Quit),
+        ],
+    }
+}
+
 fn event_stream() -> BoxStream<'static, Message> {
     let (tx, rx) = mpsc::unbounded::<Message>();
 
-    // The tray is Linux-only (ksni / StatusNotifierItem over D-Bus). Off Linux the
-    // overlay runs with the persisted config and no menu — see CLAUDE.md.
+    // Linux spawns the ksni tray on its own thread here; macOS drives its tray
+    // from `update` instead (see `subscription`/`TrayTick`).
     #[cfg(target_os = "linux")]
     {
         let cfg: config::TunerConfig = overlay::load_config("tuner");
-        ksni::TrayService::new(tray::TunerTray {
-            tx: tx.clone(),
-            enabled: cfg.enabled,
-            style: meter::MeterStyle::from_idx(cfg.meter_style_idx),
-            a4_hz: cfg.a4_hz,
-            instrument: Instrument::from_idx(cfg.instrument_idx),
-        })
-        .spawn();
+        overlay::tray::spawn(build_menu(&cfg), tx.clone());
     }
 
     std::thread::spawn(move || audio::run(tx));
 
     Box::pin(rx)
+}
+
+/// macOS tray pump tick (~100 ms). Linux uses the spawned ksni thread instead.
+#[cfg(not(target_os = "linux"))]
+fn tray_tick_stream() -> BoxStream<'static, Message> {
+    overlay::tray::tick_stream(|| Message::TrayTick)
 }
 
 fn strobe_tick_stream() -> BoxStream<'static, Message> {

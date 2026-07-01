@@ -14,11 +14,11 @@ iced = { workspace = true, features = ["canvas"] }
 futures.workspace = true
 serde.workspace = true
 
-# The system tray (ksni) and the `#[to_layer_message]` macro (iced_layershell)
-# are Linux-only; off Linux the overlay runs without a tray (see CLAUDE.md).
+# The `#[to_layer_message]` macro (iced_layershell) is Linux-only. The tray menu
+# is built from `overlay::tray` (ksni on Linux, tray-icon on macOS) — no direct
+# ksni dependency here anymore.
 [target.'cfg(target_os = "linux")'.dependencies]
 iced_layershell.workspace = true
-ksni.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

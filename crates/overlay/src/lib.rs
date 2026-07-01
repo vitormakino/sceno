@@ -10,6 +10,7 @@ mod paths;
 mod settings;
 mod stack;
 mod trace;
+pub mod tray;
 mod widgets;
 pub use paths::{cache_dir, config_dir, data_dir};
 pub use settings::{
